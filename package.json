@@ -1,0 +1,32 @@
+{
+  "name": "react-native-ecc-csr",
+  "version": "1.0.0",
+  "description": "Secure ECC KeyPair + CSR generation for Android & iOS",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "files": [
+    "android",
+    "ios",
+    "react-native-ecc-csr.podspec",
+    "src",
+    "react-native.config.js"
+  ],
+  "keywords": [
+    "react-native",
+    "android",
+    "keystore",
+    "ecc",
+    "csr",
+    "certificate",
+    "pkcs10",
+    "bouncycastle"
+  ],
+  "repository": "https://github.com/generacclean/react-native-ecc-csr",
+  "author": "Ved Yedla",
+  "license": "MIT",
+  "peerDependencies": {
+    "react-native": ">=0.60.0"
+  }
+}
