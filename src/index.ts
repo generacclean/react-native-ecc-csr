@@ -13,7 +13,7 @@ export interface CSRParams {
   commonName: string;
   serialNumber?: string;
   ipAddress?: string;
-  dnsName: string;
+  dnsName?: string;
   curve?: ECCurve;
   privateKeyAlias: string;
   phoneInfo?: string;
