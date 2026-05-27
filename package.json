@@ -25,13 +25,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/generacclean/react-native-ecc-csr.git"
+    "url": "git+https://github.com/generacclean/react-native-ecc-csr.git"
   },
   "author": "Ved Yedla",
   "license": "MIT",
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
-  },
   "peerDependencies": {
     "react-native": ">=0.60.0"
   }
