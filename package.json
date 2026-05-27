@@ -1,6 +1,6 @@
 {
   "name": "@generacclean/react-native-ecc-csr",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Secure ECC KeyPair + CSR generation for Android & iOS",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -29,6 +29,9 @@
   },
   "author": "Ved Yedla",
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "peerDependencies": {
     "react-native": ">=0.60.0"
   }
