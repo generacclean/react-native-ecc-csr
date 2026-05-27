@@ -1,4 +1,4 @@
-name: Publish to GitHub Packages
+name: Publish to AWS CodeArtifact
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: write
-  packages: write
+  id-token: write
 
 jobs:
   publish:
@@ -23,8 +23,20 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@generacclean'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::381278841082:role/installer-app-gha-oidc-role
+          aws-region: us-east-1
+
+      - name: Login to CodeArtifact
+        run: |
+          aws codeartifact login --tool npm \
+            --repository generac-ces \
+            --domain generac-ces \
+            --domain-owner 381278841082 \
+            --region us-east-1
 
       - name: Update version if specified
         if: ${{ github.event.inputs.version != '' }}
@@ -36,10 +48,8 @@ jobs:
           git commit -m "chore: bump version to ${{ github.event.inputs.version }}"
           git push
 
-      - name: Publish to GitHub Packages
+      - name: Publish to CodeArtifact
         run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create Git tag
         run: |
