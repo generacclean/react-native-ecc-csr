@@ -2,7 +2,8 @@ module.exports = {
   dependency: {
     platforms: {
       android: {
-        packageInstance: 'new com.ecccsr.CSRPackage()'
+        packageImportPath: 'import com.ecccsr.CSRPackage;',
+        packageInstance: 'new CSRPackage()'
       },
       ios: {
         project: './ios/CSRModule.xcodeproj',
