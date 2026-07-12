@@ -60,43 +60,63 @@ public class CSRModule extends ReactContextBaseJavaModule {
     // to avoid getting the system's stripped-down BC provider
     private static final Provider FULL_BC_PROVIDER = new BouncyCastleProvider();
 
+    // Thread-safe provider initialization
+    private static volatile boolean providerInitialized = false;
+    private static final Object providerLock = new Object();
+
     public CSRModule(ReactApplicationContext reactContext) {
         super(reactContext);
         ensureBouncyCastleProvider();
     }
 
     private void ensureBouncyCastleProvider() {
-        // Remove the system's stripped BC provider if it exists
-        Provider systemBcProvider = Security.getProvider("BC");
-        if (systemBcProvider != null && systemBcProvider.getClass().getName().startsWith("com.android.org.bouncycastle")) {
-            Log.d(MODULE_NAME, "Found Android system BC provider (stripped): " + systemBcProvider.getClass().getName());
-            Log.d(MODULE_NAME, "Removing system BC provider to avoid conflicts");
-            Security.removeProvider("BC");
+        // Fast path - if already initialized, return immediately
+        if (providerInitialized) {
+            return;
         }
 
-        // Register our full BouncyCastle provider at position 1 (highest priority)
-        Provider existingProvider = Security.getProvider(BouncyCastleProvider.PROVIDER_NAME);
-        if (existingProvider == null || !existingProvider.getClass().getName().equals(FULL_BC_PROVIDER.getClass().getName())) {
-            Log.d(MODULE_NAME, "Registering full BouncyCastle provider at highest priority");
-            try {
-                Security.insertProviderAt(FULL_BC_PROVIDER, 1);
-                Log.d(MODULE_NAME, "Full BouncyCastle provider registered successfully");
+        // Slow path - synchronize and initialize
+        synchronized (providerLock) {
+            // Double-check after acquiring lock
+            if (providerInitialized) {
+                return;
+            }
+
+            // Remove the system's stripped BC provider if it exists
+            Provider systemBcProvider = Security.getProvider("BC");
+            if (systemBcProvider != null && systemBcProvider.getClass().getName().startsWith("com.android.org.bouncycastle")) {
+                Log.d(MODULE_NAME, "Found Android system BC provider (stripped): " + systemBcProvider.getClass().getName());
+                Log.d(MODULE_NAME, "Removing system BC provider to avoid conflicts");
+                Security.removeProvider("BC");
+            }
+
+            // Register our full BouncyCastle provider at position 1 (highest priority)
+            Provider existingProvider = Security.getProvider(BouncyCastleProvider.PROVIDER_NAME);
+            if (existingProvider == null || !existingProvider.getClass().getName().equals(FULL_BC_PROVIDER.getClass().getName())) {
+                Log.d(MODULE_NAME, "Registering full BouncyCastle provider at highest priority");
+                try {
+                    Security.insertProviderAt(FULL_BC_PROVIDER, 1);
+                    Log.d(MODULE_NAME, "Full BouncyCastle provider registered successfully");
+                    Log.d(MODULE_NAME, "BC Provider version: " + FULL_BC_PROVIDER.getVersion());
+                    Log.d(MODULE_NAME, "BC Provider class: " + FULL_BC_PROVIDER.getClass().getName());
+                } catch (Exception e) {
+                    Log.e(MODULE_NAME, "Failed to register BouncyCastle provider: " + e.getMessage(), e);
+                }
+            } else {
+                Log.d(MODULE_NAME, "Full BouncyCastle provider already registered");
                 Log.d(MODULE_NAME, "BC Provider version: " + FULL_BC_PROVIDER.getVersion());
                 Log.d(MODULE_NAME, "BC Provider class: " + FULL_BC_PROVIDER.getClass().getName());
-            } catch (Exception e) {
-                Log.e(MODULE_NAME, "Failed to register BouncyCastle provider: " + e.getMessage(), e);
             }
-        } else {
-            Log.d(MODULE_NAME, "Full BouncyCastle provider already registered");
-            Log.d(MODULE_NAME, "BC Provider version: " + FULL_BC_PROVIDER.getVersion());
-            Log.d(MODULE_NAME, "BC Provider class: " + FULL_BC_PROVIDER.getClass().getName());
-        }
 
-        // List all registered security providers for debugging
-        Log.d(MODULE_NAME, "All registered security providers:");
-        for (Provider provider : Security.getProviders()) {
-            Log.d(MODULE_NAME, "  - " + provider.getName() + " v" + provider.getVersion() +
-                  " (" + provider.getClass().getName() + ")");
+            // List all registered security providers for debugging
+            Log.d(MODULE_NAME, "All registered security providers:");
+            for (Provider provider : Security.getProviders()) {
+                Log.d(MODULE_NAME, "  - " + provider.getName() + " v" + provider.getVersion() +
+                      " (" + provider.getClass().getName() + ")");
+            }
+
+            // Mark as initialized
+            providerInitialized = true;
         }
     }
 
@@ -226,14 +246,18 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     hasStrongBox = getReactApplicationContext().getPackageManager()
                             .hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE);
                     Log.d(MODULE_NAME, "Device StrongBox support: " + hasStrongBox);
+                }
 
-                    // StrongBox only supports P-256 (secp256r1). For other curves, use TEE.
-                    if (hasStrongBox && !keystoreCurve.equals("secp256r1")) {
-                        Log.w(MODULE_NAME, "StrongBox only supports P-256. Requested curve: " + keystoreCurve + ". Using TEE instead.");
-                        useStrongBox = false;
+                // Decide whether to use StrongBox or TEE
+                if (hasStrongBox) {
+                    if (keystoreCurve.equals("secp256r1")) {
+                        useStrongBox = true;
+                        Log.d(MODULE_NAME, "Using StrongBox-backed key generation (P-256)");
                     } else {
-                        useStrongBox = hasStrongBox;
+                        Log.w(MODULE_NAME, "StrongBox only supports P-256. Requested curve: " + keystoreCurve + ". Using TEE instead.");
                     }
+                } else {
+                    Log.d(MODULE_NAME, "Using hardware-backed (TEE) key generation");
                 }
 
                 KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(
@@ -252,14 +276,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
                                 KeyProperties.DIGEST_SHA512)
                         .setUserAuthenticationRequired(false);
 
-                // Only apply StrongBox backing if compatible
+                // Apply StrongBox backing if available and compatible
                 if (useStrongBox) {
                     specBuilder.setIsStrongBoxBacked(true);
-                    Log.d(MODULE_NAME, "Using StrongBox-backed key generation (P-256)");
-                } else if (hasStrongBox) {
-                    Log.d(MODULE_NAME, "Using hardware-backed (TEE) key generation (StrongBox available but curve incompatible)");
-                } else {
-                    Log.d(MODULE_NAME, "Using hardware-backed (TEE) key generation");
                 }
 
                 keyPairGenerator.initialize(specBuilder.build());
@@ -283,12 +302,13 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 Log.d(MODULE_NAME, "Using full BouncyCastle provider version: " + FULL_BC_PROVIDER.getVersion());
                 Log.d(MODULE_NAME, "BC Provider class: " + FULL_BC_PROVIDER.getClass().getName());
 
-                // Check if our BC provider supports EC algorithm
+                // Generate EC key pair
+                KeyPairGenerator keyPairGenerator;
                 try {
-                    Log.d(MODULE_NAME, "Checking EC algorithm support in full BouncyCastle...");
-                    KeyPairGenerator testKpg = KeyPairGenerator.getInstance("EC", FULL_BC_PROVIDER);
-                    Log.d(MODULE_NAME, "EC algorithm IS supported by BouncyCastle: " + testKpg.getProvider().getName());
-                } catch (Exception e) {
+                    keyPairGenerator = KeyPairGenerator.getInstance("EC", FULL_BC_PROVIDER);
+                    Log.d(MODULE_NAME, "EC algorithm supported, provider: " + keyPairGenerator.getProvider().getName());
+                } catch (NoSuchAlgorithmException e) {
+                    // Diagnostic logging only on failure
                     Log.e(MODULE_NAME, "EC algorithm NOT supported by BouncyCastle provider!", e);
                     Log.e(MODULE_NAME, "BC Provider info: " + FULL_BC_PROVIDER.getInfo());
                     Log.e(MODULE_NAME, "Available algorithms in BC:");
@@ -297,10 +317,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
                             Log.e(MODULE_NAME, "  - " + service.getAlgorithm());
                         }
                     }
-                    throw new Exception("BouncyCastle provider does not support EC algorithm. Provider may be corrupted or stripped by ProGuard/R8.");
+                    throw new Exception("BouncyCastle provider does not support EC algorithm. Provider may be corrupted or stripped by ProGuard/R8.", e);
                 }
 
-                KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("EC", FULL_BC_PROVIDER);
                 ECGenParameterSpec ecSpec = new ECGenParameterSpec(keystoreCurve);
                 keyPairGenerator.initialize(ecSpec, new SecureRandom());
                 keyPair = keyPairGenerator.generateKeyPair();
@@ -308,14 +327,13 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 
                 KeyStore softwareKeyStore;
                 String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
-                
-                try {
-                    FileInputStream fis = new FileInputStream(keystorePath);
-                    softwareKeyStore = KeyStore.getInstance("PKCS12");
+
+                // Try to load existing keystore, create new if doesn't exist
+                softwareKeyStore = KeyStore.getInstance("PKCS12");
+                try (FileInputStream fis = new FileInputStream(keystorePath)) {
                     softwareKeyStore.load(fis, "".toCharArray());
-                    fis.close();
                 } catch (Exception e) {
-                    softwareKeyStore = KeyStore.getInstance("PKCS12");
+                    // Keystore doesn't exist or is corrupted, create a new one
                     softwareKeyStore.load(null, null);
                 }
                 
@@ -328,10 +346,11 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     "".toCharArray(),
                     new java.security.cert.Certificate[] { selfSignedCert }
                 );
-                
-                FileOutputStream fos = new FileOutputStream(keystorePath);
-                softwareKeyStore.store(fos, "".toCharArray());
-                fos.close();
+
+                // Save keystore to file
+                try (FileOutputStream fos = new FileOutputStream(keystorePath)) {
+                    softwareKeyStore.store(fos, "".toCharArray());
+                }
             }
 
             PrivateKey privateKey = keyPair.getPrivate();
@@ -436,18 +455,21 @@ public class CSRModule extends ReactContextBaseJavaModule {
             
             try {
                 String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
-                FileInputStream fis = new FileInputStream(keystorePath);
                 KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
-                softwareKeyStore.load(fis, "".toCharArray());
-                fis.close();
-                
+
+                // Load existing keystore
+                try (FileInputStream fis = new FileInputStream(keystorePath)) {
+                    softwareKeyStore.load(fis, "".toCharArray());
+                }
+
                 if (softwareKeyStore.containsAlias(privateKeyAlias)) {
                     softwareKeyStore.deleteEntry(privateKeyAlias);
-                    
-                    FileOutputStream fos = new FileOutputStream(keystorePath);
-                    softwareKeyStore.store(fos, "".toCharArray());
-                    fos.close();
-                    
+
+                    // Save updated keystore
+                    try (FileOutputStream fos = new FileOutputStream(keystorePath)) {
+                        softwareKeyStore.store(fos, "".toCharArray());
+                    }
+
                     deleted = true;
                     Log.d(MODULE_NAME, "Deleted software key: " + privateKeyAlias);
                 }
@@ -516,10 +538,10 @@ public class CSRModule extends ReactContextBaseJavaModule {
             
             try {
                 String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
-                FileInputStream fis = new FileInputStream(keystorePath);
                 KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
-                softwareKeyStore.load(fis, "".toCharArray());
-                fis.close();
+                try (FileInputStream fis = new FileInputStream(keystorePath)) {
+                    softwareKeyStore.load(fis, "".toCharArray());
+                }
                 
                 promise.resolve(softwareKeyStore.containsAlias(privateKeyAlias));
             } catch (Exception e) {
@@ -553,11 +575,11 @@ public class CSRModule extends ReactContextBaseJavaModule {
             }
             
             String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
-            FileInputStream fis = new FileInputStream(keystorePath);
             KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
-            softwareKeyStore.load(fis, "".toCharArray());
-            fis.close();
-            
+            try (FileInputStream fis = new FileInputStream(keystorePath)) {
+                softwareKeyStore.load(fis, "".toCharArray());
+            }
+
             if (softwareKeyStore.containsAlias(privateKeyAlias)) {
                 KeyStore.Entry entry = softwareKeyStore.getEntry(
                     privateKeyAlias, 
