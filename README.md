@@ -342,3 +342,112 @@ Android includes a stripped-down BouncyCastle provider that only supports RSA, D
 - Uses the full provider directly to avoid conflicts
 
 See [SYSTEM_BC_PROVIDER_FIX.md](./docs/SYSTEM_BC_PROVIDER_FIX.md) for technical details.
+
+## Security Considerations
+
+Understanding the security implications of different key storage methods is important for making informed decisions.
+
+### Software Keys (Android)
+
+**Storage Details**:
+- Stored in PKCS12 format in app's private directory (`software_keys.p12`)
+- File is protected by Android app sandbox (file permissions: mode 0600)
+- **Not encrypted at rest** (uses empty password for PKCS12 keystore)
+- Automatically deleted when app is uninstalled
+
+**Security Level**:
+- ✅ **Protected from**: Other apps, normal users
+- ⚠️ **Vulnerable to**: Root access, device backups (if enabled), physical access with debugging
+
+**Recommended For**:
+- Development and testing
+- Older devices (Android 11 and below)
+- Non-critical use cases
+- Scenarios where TLS compatibility is uncertain
+
+### Hardware Keys (Android)
+
+**Storage Details**:
+- Stored in Android Keystore (TEE or StrongBox)
+- Protected by hardware security module
+- Private keys **cannot be exported or extracted**
+- Survive app reinstall (must explicitly call `deleteKey()` to remove)
+
+**Security Level**:
+- ✅ **Protected from**: All software-based attacks, including root access
+- ✅ **Hardware-backed**: Cryptographic operations performed in secure hardware
+- ✅ **Tamper-resistant**: Even physical access cannot extract key material
+
+**Recommended For**:
+- Production environments
+- Android 12+ devices (for TLS compatibility)
+- High-security requirements
+- Long-term key storage
+
+### Best Practices
+
+1. **Use Hardware Keys When Available**
+   ```typescript
+   const caps = await CSRModule.getHardwareKeystoreCapabilities();
+   const result = await CSRModule.generateCSR({
+     commonName: "device-001",
+     privateKeyAlias: "my-key",
+     useHardwareKey: caps.tlsCompatible  // Use HW if device supports it
+   });
+   ```
+
+2. **Check What Was Actually Used**
+   ```typescript
+   if (result.hardwareKeyRequested && !result.useHardwareKey) {
+     console.warn("Hardware key requested but device doesn't support TLS with hardware keys");
+     console.log("Using software keystore instead");
+   }
+   ```
+
+3. **Implement Key Rotation**
+   - Periodically generate new keys and CSRs
+   - Delete old keys after successful certificate renewal
+   ```typescript
+   await CSRModule.deleteKey("old-key-alias");
+   ```
+
+4. **Handle Device Backups**
+   - Add `android:allowBackup="false"` to `AndroidManifest.xml` if using software keys
+   - Or exclude the keystore file from backups:
+   ```xml
+   <full-backup-content>
+     <exclude domain="file" path="software_keys.p12"/>
+   </full-backup-content>
+   ```
+
+5. **Monitor Key Storage Type**
+   - Log which storage method is being used
+   - Alert if production devices fall back to software keys unexpectedly
+   ```typescript
+   if (!result.isHardwareBacked) {
+     analytics.track('software_key_used', {
+       device: caps.manufacturer + ' ' + caps.model,
+       androidVersion: caps.androidSdkVersion
+     });
+   }
+   ```
+
+### Security Trade-offs
+
+| Aspect | Software Keys | Hardware Keys |
+|--------|---------------|---------------|
+| **Encryption at Rest** | ❌ None (empty password) | ✅ Hardware-encrypted |
+| **Root Protection** | ❌ Vulnerable | ✅ Protected |
+| **Backup Exposure** | ⚠️ Can be backed up | ✅ Cannot be backed up |
+| **Device Compatibility** | ✅ All devices (API 21+) | ⚠️ Android 12+ for TLS |
+| **Performance** | ⚠️ Slower (software crypto) | ✅ Faster (hardware acceleration) |
+| **Survives Reinstall** | ❌ Deleted with app | ✅ Persists (manual delete required) |
+
+### Compliance & Regulatory Considerations
+
+- **FIPS 140-2**: Hardware keys in StrongBox may meet FIPS requirements (device-dependent)
+- **PCI DSS**: Hardware-backed keys recommended for payment applications
+- **GDPR**: Both methods comply when proper access controls are in place
+- **HIPAA**: Hardware-backed keys recommended for healthcare data
+
+For maximum security, always prefer hardware-backed keys (`useHardwareKey: true`) on supported devices (Android 12+).
