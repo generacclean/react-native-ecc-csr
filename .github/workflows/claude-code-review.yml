@@ -56,10 +56,11 @@ jobs:
             echo "::error::Prompt file $PROMPT_FILE not found."
             exit 1
           fi
+          delimiter="PROMPT_EOF_${RANDOM}"
           {
-            echo 'prompt<<PROMPT_EOF'
+            echo "prompt<<${delimiter}"
             cat "$PROMPT_FILE"
-            echo 'PROMPT_EOF'
+            echo "${delimiter}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS Credentials

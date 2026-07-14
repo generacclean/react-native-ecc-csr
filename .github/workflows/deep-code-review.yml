@@ -51,11 +51,12 @@ jobs:
             exit 1
           fi
           pr_number="${{ steps.pr.outputs.number }}"
+          delimiter="DEEP_REVIEW_PROMPT_EOF_${RANDOM}"
           {
-            echo 'prompt<<DEEP_REVIEW_PROMPT_EOF'
+            echo "prompt<<${delimiter}"
             # Substitute {{PR_NUMBER}} placeholder with actual PR number
             sed "s/{{PR_NUMBER}}/${pr_number}/g" "$PROMPT_FILE"
-            echo 'DEEP_REVIEW_PROMPT_EOF'
+            echo "${delimiter}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS Credentials

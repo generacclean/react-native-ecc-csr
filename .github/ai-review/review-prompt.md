@@ -105,7 +105,7 @@ Rate each candidate issue 0-100 for confidence + impact:
 
 - Post specific issues as **inline comments** via `mcp__github_inline_comment__create_inline_comment`.
 - Post ONE top-level **summary** via `gh pr comment` containing: overview of changes, issues found grouped by severity, overall assessment. If nothing meets the bar, say **NO ISSUES FOUND**.
-- Begin the summary with: `_🤖 Automated code review. Addressing it doesn't guarantee a merge; a human still owns approval._`
+- Begin the summary with: `_🤖 AI code review. Addressing it doesn't guarantee a merge; a human still owns approval._`
 - Do NOT duplicate still-open inline comments. On re-reviews (new commits), skip already-addressed issues and focus only on newly introduced code.
 - Give reasoning for every comment and reference specific patterns when relevant (e.g., "This software keystore lacks EncryptedFile wrapper - see v1.2.0 encryption requirements").
 - Only communicate through GitHub comments — do not emit the review as chat/log messages.
