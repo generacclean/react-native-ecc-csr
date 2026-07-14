@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      Library manifest - these attributes are merged with the consuming app's manifest
+
+      CRITICAL SECURITY: Backup exclusion rules are defined in backup_rules.xml
+      The consuming app should either:
+      1. Set android:allowBackup="false" (disables all backups)
+      2. Include android:fullBackupContent="@xml/backup_rules" (selective exclusion)
+
+      This library provides backup_rules.xml which will be automatically merged
+      if the consuming app uses fullBackupContent.
+    -->
+</manifest>

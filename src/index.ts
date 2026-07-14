@@ -18,6 +18,11 @@ export interface CSRParams {
   privateKeyAlias: string;
   phoneInfo?: string;
   useHardwareKey?: boolean;
+  /**
+   * Allow overwriting an existing key with the same alias.
+   * Default: false (will reject with KEY_EXISTS error if key already exists)
+   */
+  allowOverwrite?: boolean;
 }
 
 export interface CSRResult {
