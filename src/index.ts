@@ -18,11 +18,6 @@ export interface CSRParams {
   privateKeyAlias: string;
   phoneInfo?: string;
   useHardwareKey?: boolean;
-  /**
-   * Allow overwriting an existing key with the same alias.
-   * Default: false (will reject with KEY_EXISTS error if key already exists)
-   */
-  allowOverwrite?: boolean;
 }
 
 export interface CSRResult {
@@ -31,38 +26,18 @@ export interface CSRResult {
   publicKey: string;
   isHardwareBacked: boolean;
   useHardwareKey: boolean;
-  hardwareKeyRequested: boolean;
-  tlsCompatible: boolean;
-}
-
-export interface HardwareKeystoreCapabilities {
-  tlsCompatible: boolean;
-  androidSdkVersion: number;
-  hasStrongBox: boolean;
-  manufacturer: string;
-  model: string;
-  device: string;
 }
 
 export interface CSRModuleInterface {
   /**
    * Generates a Certificate Signing Request (CSR) with ECC key pair.
-   * The module intelligently decides hardware vs software backing based on device capabilities.
-   * Apps can request hardware keys via useHardwareKey parameter, but the module will override
-   * this if the device doesn't support hardware keys for TLS (requires Android 12+).
-   *
+   * Default: Software keys (more compatible with TLS on most devices)
+   * Hardware keys can be enabled via useHardwareKey parameter.
+   * 
    * @param params - CSR parameters including privateKeyAlias and optional useHardwareKey
    * @returns Promise resolving to CSR, key alias, public key, and key storage info
    */
   generateCSR(params: CSRParams): Promise<CSRResult>;
-
-  /**
-   * Checks if the device supports hardware-backed keys for TLS.
-   * Apps should call this before requesting hardware keys to understand device capabilities.
-   *
-   * @returns Promise resolving to device capability information
-   */
-  getHardwareKeystoreCapabilities(): Promise<HardwareKeystoreCapabilities>;
 
   /**
    * Deletes a key from both hardware and software keystores
