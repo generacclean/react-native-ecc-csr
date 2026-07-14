@@ -1,6 +1,6 @@
 {
   "name": "@generacclean/react-native-ecc-csr",
-  "version": "1.0.3",
+  "version": "1.2.0",
   "description": "Secure ECC KeyPair + CSR generation for Android & iOS",
   "main": "src/index.ts",
   "types": "src/index.ts",
