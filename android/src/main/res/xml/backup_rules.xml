@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup exclusion rules for CSR module
+
+  CRITICAL SECURITY: Exclude software keystore from device backups
+
+  Without this, private keys would be:
+  - Uploaded to Google Drive / cloud backup services
+  - Accessible via 'adb backup' on debug builds
+  - Persisted even after app uninstall
+  - Potentially accessible to attackers with backup access
+
+  See: https://developer.android.com/guide/topics/data/autobackup
+-->
+<full-backup-content>
+    <!-- Exclude software keystore file from all backups -->
+    <exclude domain="file" path="software_keys.p12"/>
+    <exclude domain="file" path="software_keys_v1.p12"/>
+
+    <!-- Exclude any potential backup/temp files -->
+    <exclude domain="file" path="software_keys.p12.bak"/>
+    <exclude domain="file" path="software_keys.p12.tmp"/>
+</full-backup-content>

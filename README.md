@@ -2,6 +2,35 @@
 
 A React Native module for generating Certificate Signing Requests (CSR) with Elliptic Curve Cryptography (ECC) support.
 
+## ⚠️ IMPORTANT SECURITY NOTICE
+
+### Software Keystore Security (useHardwareKey=false)
+
+**Encryption at Rest:** As of v1.2.0, software-backed keys are **encrypted at rest** using AndroidX Security's `EncryptedFile` with AES256-GCM encryption. The encryption key is stored in Android Keystore, providing hardware-backed protection for the software keystore.
+
+**Previous versions (< 1.2.0):** Keys were stored unencrypted with an empty password.
+
+**Backup Exclusion:** The keystore file is automatically excluded from device backups (see `backup_rules.xml`). However, **you must ensure your app properly configures backup settings** in `AndroidManifest.xml`:
+
+```xml
+<application
+    android:allowBackup="false">
+    <!-- OR for selective backup: -->
+    android:fullBackupContent="@xml/backup_rules">
+</application>
+```
+
+**Security Recommendations:**
+- ✅ **Production apps:** Use `useHardwareKey=true` on Android 12+ devices whenever possible
+- ✅ **Development/Testing:** Software keys are acceptable
+- ✅ **Older devices (Android 11-):** Software keys with encryption at rest are your best option
+- ⚠️ **High-security requirements:** Always prefer hardware-backed keys (Android 12+)
+- ⚠️ **Compliance (HIPAA/PCI DSS):** Use hardware-backed keys or verify encrypted software keys meet requirements
+
+See [Security Considerations](#security-considerations) section below for detailed analysis.
+
+---
+
 ## Features
 
 - ✅ Generate CSR with ECC keys (P-256, P-384, P-521)
@@ -294,45 +323,38 @@ const result: CSRResult = await CSRModule.generateCSR(params);
 
 ### Android
 
-- `org.bouncycastle:bcprov-jdk18on:1.76`
-- `org.bouncycastle:bcpkix-jdk18on:1.76`
+- `org.bouncycastle:bcprov-jdk18on:1.76` - Cryptographic provider with EC support
+- `org.bouncycastle:bcpkix-jdk18on:1.76` - PKI and certificate utilities
+- `androidx.security:security-crypto:1.0.0` - EncryptedFile for keystore encryption
 
-These are automatically included by the module.
+These are automatically included by the module as transitive dependencies.
 
 ## Android Configuration
 
-### ProGuard/R8 Rules (Important!)
+### ProGuard/R8 Rules
 
-If your app uses ProGuard or R8 (enabled by default in release builds), you **must** add these rules to prevent the BouncyCastle crypto algorithms from being stripped:
+**Good news:** The module automatically applies ProGuard rules via `consumerProguardFiles`, so most apps won't need manual configuration.
+
+**If you experience issues in release builds**, verify these rules are present in your app's `android/app/proguard-rules.pro`:
 
 ```proguard
-# BouncyCastle ProGuard/R8 Rules
-# Prevent stripping of BouncyCastle cryptographic algorithms
-
-# Keep all BouncyCastle classes
--keep class org.bouncycastle.** { *; }
--dontwarn org.bouncycastle.**
-
-# Keep EC (Elliptic Curve) algorithm implementations
+# BouncyCastle - keep EC algorithm implementations
 -keep class org.bouncycastle.jcajce.provider.asymmetric.ec.** { *; }
 -keep class org.bouncycastle.jce.provider.** { *; }
+-keep class org.bouncycastle.crypto.** { *; }
+-keep class org.bouncycastle.asn1.** { *; }
 
-# Keep Security Provider registration
--keep class org.bouncycastle.jce.provider.BouncyCastleProvider { *; }
-
-# Keep cryptographic service classes
--keepclassmembers class * extends java.security.Provider {
-    <init>(...);
-}
-
-# Prevent optimization of crypto algorithms
--keepnames class org.bouncycastle.jcajce.provider.** { *; }
--keepnames class org.bouncycastle.jce.provider.** { *; }
+# AndroidX Security
+-keep class androidx.security.crypto.** { *; }
 ```
 
-Add these to your app's `android/app/proguard-rules.pro` file.
+**Why this matters**: Without these rules, R8 may strip the EC (Elliptic Curve) algorithms from BouncyCastle, causing `NoSuchAlgorithmException: no such algorithm: EC` errors in release builds.
 
-**Why this is needed**: Without these rules, R8 will strip the EC (Elliptic Curve) algorithms from BouncyCastle, causing `NoSuchAlgorithmException: no such algorithm: EC` errors in release builds.
+**Debugging:** To verify ProGuard rules are applied:
+```bash
+# Check if BC classes are kept in release build
+unzip -l app-release.apk | grep bouncycastle
+```
 
 ### System BouncyCastle Provider
 
@@ -349,21 +371,31 @@ Understanding the security implications of different key storage methods is impo
 
 ### Software Keys (Android)
 
+**🔒 Version 1.2.0+ (Current) - Encrypted at Rest:**
+
 **Storage Details**:
-- Stored in PKCS12 format in app's private directory (`software_keys.p12`)
-- File is protected by Android app sandbox (file permissions: mode 0600)
-- **Not encrypted at rest** (uses empty password for PKCS12 keystore)
+- Stored in PKCS12 format in app's private directory (`software_keys_v1.p12`)
+- **Encrypted at rest** using AndroidX Security `EncryptedFile` (AES256-GCM)
+- Encryption key stored in Android Keystore (hardware-backed)
+- File permissions explicitly set to mode 0600 (owner read/write only)
+- Automatically excluded from device backups (via `backup_rules.xml`)
 - Automatically deleted when app is uninstalled
 
 **Security Level**:
-- ✅ **Protected from**: Other apps, normal users
-- ⚠️ **Vulnerable to**: Root access, device backups (if enabled), physical access with debugging
+- ✅ **Protected from**: Other apps, normal users, device backups
+- ✅ **Encrypted**: AES256-GCM with hardware-backed encryption key
+- ⚠️ **Vulnerable to**: Root access with Android Keystore compromise (extremely difficult)
 
 **Recommended For**:
 - Development and testing
-- Older devices (Android 11 and below)
-- Non-critical use cases
-- Scenarios where TLS compatibility is uncertain
+- Older devices (Android 11 and below where hardware TLS not supported)
+- Use cases where hardware keys not available
+- Short-to-medium term key storage
+
+**⚠️ Version < 1.2.0 (Legacy) - Unencrypted:**
+- Stored with empty password (no encryption at rest)
+- Vulnerable to root access, device backups, physical access with debugging
+- **Upgrade to 1.2.0+ for encryption at rest**
 
 ### Hardware Keys (Android)
 
@@ -411,13 +443,21 @@ Understanding the security implications of different key storage methods is impo
    await CSRModule.deleteKey("old-key-alias");
    ```
 
-4. **Handle Device Backups**
-   - Add `android:allowBackup="false"` to `AndroidManifest.xml` if using software keys
-   - Or exclude the keystore file from backups:
+4. **Handle Device Backups** ⚠️ **CRITICAL**
+   - The module provides `backup_rules.xml` which automatically excludes the keystore file
+   - **You MUST configure your app's manifest** to use backup rules:
    ```xml
-   <full-backup-content>
-     <exclude domain="file" path="software_keys.p12"/>
-   </full-backup-content>
+   <!-- Option 1: Disable all backups (simplest) -->
+   <application android:allowBackup="false" ...>
+
+   <!-- Option 2: Use selective backup with module's rules (recommended) -->
+   <application android:fullBackupContent="@xml/backup_rules" ...>
+   ```
+   - Without this, **private keys will be uploaded to cloud backups** (Google Drive, etc.)
+   - The module's `backup_rules.xml` excludes:
+     - `software_keys.p12` (legacy)
+     - `software_keys_v1.p12` (current)
+     - Backup and temp files
    ```
 
 5. **Monitor Key Storage Type**
@@ -434,20 +474,28 @@ Understanding the security implications of different key storage methods is impo
 
 ### Security Trade-offs
 
-| Aspect | Software Keys | Hardware Keys |
-|--------|---------------|---------------|
-| **Encryption at Rest** | ❌ None (empty password) | ✅ Hardware-encrypted |
-| **Root Protection** | ❌ Vulnerable | ✅ Protected |
-| **Backup Exposure** | ⚠️ Can be backed up | ✅ Cannot be backed up |
-| **Device Compatibility** | ✅ All devices (API 21+) | ⚠️ Android 12+ for TLS |
+| Aspect | Software Keys (v1.2.0+) | Hardware Keys |
+|--------|-------------------------|---------------|
+| **Encryption at Rest** | ✅ AES256-GCM (hardware-backed key) | ✅ Hardware-encrypted |
+| **Root Protection** | ⚠️ Protected (requires Keystore compromise) | ✅ Fully protected |
+| **Backup Exposure** | ✅ Excluded (if configured) | ✅ Cannot be backed up |
+| **Device Compatibility** | ✅ All devices (API 23+) | ⚠️ Android 12+ for TLS |
 | **Performance** | ⚠️ Slower (software crypto) | ✅ Faster (hardware acceleration) |
 | **Survives Reinstall** | ❌ Deleted with app | ✅ Persists (manual delete required) |
+| **Key Extraction** | ⚠️ Possible with root + Keystore access | ✅ Impossible (hardware-bound) |
+
+**Note:** Software keys in v1.2.0+ are significantly more secure than earlier versions due to encryption at rest.
 
 ### Compliance & Regulatory Considerations
 
-- **FIPS 140-2**: Hardware keys in StrongBox may meet FIPS requirements (device-dependent)
-- **PCI DSS**: Hardware-backed keys recommended for payment applications
-- **GDPR**: Both methods comply when proper access controls are in place
-- **HIPAA**: Hardware-backed keys recommended for healthcare data
+- **FIPS 140-2**: 
+  - Hardware keys in StrongBox may meet FIPS 140-2 Level 3 (device-dependent, verify specific device certification)
+  - Software keys (even encrypted) typically do NOT meet FIPS 140-2 requirements
+- **PCI DSS**: Hardware-backed keys strongly recommended for payment applications; encrypted software keys may be acceptable with risk assessment
+- **GDPR**: Both methods comply when proper access controls and backup exclusion are configured
+- **HIPAA**: Hardware-backed keys recommended for ePHI; encrypted software keys acceptable with documented risk analysis
+- **SOC 2**: Hardware keys preferred; software keys with encryption at rest may satisfy Type II requirements
+
+**Recommendation:** Always verify compliance requirements with your security/compliance team before deployment.
 
 For maximum security, always prefer hardware-backed keys (`useHardwareKey: true`) on supported devices (Android 12+).
