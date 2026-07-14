@@ -1,0 +1,15 @@
+# Team allowlist for automated AI code review
+#
+# One GitHub username per line. PRs authored by users on this list get
+# the automated review. Comparison is case-insensitive.
+#
+# Rules:
+#   - Blank lines and lines starting with `#` are ignored.
+#   - Leading/trailing whitespace is ignored.
+
+castulo
+benjaminkomen
+evanbiskey
+vedgenerac
+jordanjkelly12
+kuznetsov-sergei
