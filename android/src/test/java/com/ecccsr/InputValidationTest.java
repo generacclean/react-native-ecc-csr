@@ -16,8 +16,15 @@ public class InputValidationTest {
             return false;
         }
         try {
-            InetAddress.getByName(ip.trim());
-            return true;
+            String trimmed = ip.trim();
+            InetAddress addr = InetAddress.getByName(trimmed);
+
+            // Verify input is a literal IP address, not a hostname that resolved
+            // For IPv6, strip brackets for comparison
+            String resolvedAddr = addr.getHostAddress();
+            String inputForComparison = trimmed.replace("[", "").replace("]", "");
+
+            return resolvedAddr.equals(trimmed) || resolvedAddr.equals(inputForComparison);
         } catch (UnknownHostException e) {
             return false;
         }
@@ -82,17 +89,14 @@ public class InputValidationTest {
     @Test
     public void testHostnames() {
         // Hostnames should be rejected for IP address field
-        // But InetAddress.getByName() actually resolves hostnames
-        // So this test documents current behavior
-        try {
-            boolean result = isValidIPAddress("localhost");
-            // This will likely pass because InetAddress resolves it
-            // In production, you might want stricter validation
-            assertTrue("localhost resolves, so validation passes", result);
-        } catch (Exception e) {
-            // If DNS resolution fails, that's also acceptable
-            assertTrue("DNS resolution failure is acceptable", true);
-        }
+        // The isValidIPAddress() method verifies that the input is a literal IP address
+        // by comparing it to the resolved address, preventing hostname injection
+        assertFalse("localhost should be rejected as a non-literal hostname",
+                isValidIPAddress("localhost"));
+        assertFalse("example.com should be rejected as a hostname",
+                isValidIPAddress("example.com"));
+        assertFalse("www.google.com should be rejected as a hostname",
+                isValidIPAddress("www.google.com"));
     }
 
     @Test
