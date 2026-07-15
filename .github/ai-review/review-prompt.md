@@ -105,8 +105,35 @@ Rate each candidate issue 0-100 for confidence + impact:
 
 - Post specific issues as **inline comments** via `mcp__github_inline_comment__create_inline_comment`.
 - Post ONE top-level **summary** via `gh pr comment` containing: overview of changes, issues found grouped by severity, overall assessment. If nothing meets the bar, say **NO ISSUES FOUND**.
-- Begin the summary with: `_🤖 AI code review. Addressing it doesn't guarantee a merge; a human still owns approval._`
+- Begin the summary with: `_🤖 AI code review. A human code-owner approval is still required to merge._`
 - Do NOT duplicate still-open inline comments. On re-reviews (new commits), skip already-addressed issues and focus only on newly introduced code.
 - Give reasoning for every comment and reference specific patterns when relevant (e.g., "This software keystore lacks EncryptedFile wrapper - see v1.2.0 encryption requirements").
 - Only communicate through GitHub comments — do not emit the review as chat/log messages.
 - Be concise but specific - cite line numbers, function names, and actual code patterns.
+
+## Review verdict
+
+After posting the inline comments and the summary, submit **exactly one** GitHub review that
+reflects what you found. This is what lets the AI review count as one of the required approvals on
+allowlisted PRs — but only a human code-owner approval can satisfy the mandatory code-owner
+requirement, so an AI approval never merges a PR on its own. Map the verdict to the same 0-100 scale
+used above:
+
+- **`gh pr review --approve --body "<one-line reason>"`** — nothing meets the bar
+  (the same **NO ISSUES FOUND** case). This is the only outcome that adds an approval.
+- **`gh pr review --request-changes --body "<one-line reason>"`** — one or more
+  **blocking** issues exist (rated **91-100**: a critical bug or security issue). This blocks the
+  merge until addressed.
+- **`gh pr review --comment --body "<one-line reason>"`** — only **non-blocking**
+  issues exist (rated **76-90**: important but not merge-blocking). This records feedback without
+  gating the merge.
+
+Rules for the verdict:
+
+- Submit the review AFTER the inline comments and summary, and submit only one.
+- The `--body` should be a single sentence pointing at the summary comment for detail — do not repeat
+  the full summary in the review body.
+- On re-reviews (new commits), re-submit the verdict that matches the current state of the code. Note
+  that a prior **Approve** is not auto-dismissed when new commits land, so if a later push introduces a
+  blocking issue you MUST submit a fresh `--request-changes` to override the stale approval.
+- Never submit `--approve` while any unaddressed **blocking** (91-100) issue remains.
