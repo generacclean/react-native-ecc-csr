@@ -61,8 +61,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
     private static final String MODULE_NAME = "CSRModule";
     private static final String ANDROID_KEYSTORE = "AndroidKeyStore";
 
-    // Add versioning to keystore filename for future migrations
-    private static final String SOFTWARE_KEYSTORE_FILE = "software_keys_v1.p12";
+    private static final String SOFTWARE_KEYSTORE_FILE = "software_keys.p12";
 
     // Align defaults with documentation (Generac-specific values)
     private static final String DEFAULT_COUNTRY = "US";
@@ -133,17 +132,44 @@ public class CSRModule extends ReactContextBaseJavaModule {
         return MODULE_NAME;
     }
 
-    // Close ByteArrayOutputStream properly
+    /**
+     * ContentSigner implementation for Android Keystore.
+     *
+     * Uses a FilterOutputStream to feed signature.update() incrementally during writes
+     * rather than buffering the full payload. This is architecturally safer than buffering
+     * the entire TBS (to-be-signed) data in a ByteArrayOutputStream and feeding it to the
+     * Signature object only in getSignature().
+     */
     private static class AndroidKeystoreContentSigner implements ContentSigner {
-        private final ByteArrayOutputStream outputStream;
         private final AlgorithmIdentifier sigAlgId;
         private final Signature signature;
+        private final OutputStream outputStream;
 
         public AndroidKeystoreContentSigner(PrivateKey privateKey, String algorithm) throws Exception {
-            this.outputStream = new ByteArrayOutputStream();
             this.sigAlgId = new DefaultSignatureAlgorithmIdentifierFinder().find(algorithm);
             this.signature = Signature.getInstance(algorithm);
             this.signature.initSign(privateKey);
+
+            // Wrap a FilterOutputStream that feeds signature.update() on each write
+            this.outputStream = new FilterOutputStream(new ByteArrayOutputStream()) {
+                @Override
+                public void write(int b) throws IOException {
+                    try {
+                        signature.update((byte) b);
+                    } catch (SignatureException e) {
+                        throw new IOException("Signature update failed", e);
+                    }
+                }
+
+                @Override
+                public void write(byte[] b, int off, int len) throws IOException {
+                    try {
+                        signature.update(b, off, len);
+                    } catch (SignatureException e) {
+                        throw new IOException("Signature update failed", e);
+                    }
+                }
+            };
         }
 
         @Override
@@ -159,7 +185,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         @Override
         public byte[] getSignature() {
             try {
-                signature.update(outputStream.toByteArray());
+                // Signature already updated incrementally via outputStream writes
                 return signature.sign();
             } catch (Exception e) {
                 throw new RuntimeException("Failed to sign", e);
@@ -167,7 +193,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 try {
                     outputStream.close();
                 } catch (IOException ignored) {
-                    // ByteArrayOutputStream close is a no-op, but good practice
+                    // FilterOutputStream close - safe to ignore
                 }
             }
         }
@@ -199,14 +225,28 @@ public class CSRModule extends ReactContextBaseJavaModule {
         return android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S;
     }
 
-    // IP address validation
+    /**
+     * IP address validation - accepts only literal IP addresses, not hostnames.
+     *
+     * InetAddress.getByName() accepts hostnames that resolve via DNS, so we must
+     * verify the input is a literal address by comparing the input to the resolved
+     * address string. This prevents hostname injection into SAN iPAddress extensions,
+     * which would produce malformed certificates.
+     */
     private boolean isValidIPAddress(String ip) {
         if (ip == null || ip.trim().isEmpty()) {
             return false;
         }
         try {
-            InetAddress.getByName(ip.trim());
-            return true;
+            String trimmed = ip.trim();
+            InetAddress addr = InetAddress.getByName(trimmed);
+
+            // Verify input is a literal IP address, not a hostname that resolved
+            // For IPv6, strip brackets for comparison
+            String resolvedAddr = addr.getHostAddress();
+            String inputForComparison = trimmed.replace("[", "").replace("]", "");
+
+            return resolvedAddr.equals(trimmed) || resolvedAddr.equals(inputForComparison);
         } catch (UnknownHostException e) {
             return false;
         }
@@ -271,6 +311,12 @@ public class CSRModule extends ReactContextBaseJavaModule {
         try {
             // Check software keystore (must be synchronized)
             synchronized (SOFTWARE_KEYSTORE_LOCK) {
+                // Explicit file existence check before constructing EncryptedFile
+                File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+                if (!keystoreFile.exists()) {
+                    return false;
+                }
+
                 EncryptedFile encFile = getEncryptedKeystoreFile(getReactApplicationContext());
                 KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
 
@@ -316,7 +362,6 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String curve = params.hasKey("curve") ? params.getString("curve") : DEFAULT_ECC_CURVE;
             String phoneInfo = params.hasKey("phoneInfo") ? params.getString("phoneInfo") : null;
             String privateKeyAlias = params.hasKey("privateKeyAlias") ? params.getString("privateKeyAlias") : null;
-            boolean allowOverwrite = params.hasKey("allowOverwrite") ? params.getBoolean("allowOverwrite") : false;
 
             // Validate required parameters
             if (privateKeyAlias == null || privateKeyAlias.trim().isEmpty()) {
@@ -336,13 +381,8 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 return;
             }
 
-            // Check for key collision
-            if (!allowOverwrite && keyExistsSynchronous(privateKeyAlias)) {
-                promise.reject("KEY_EXISTS",
-                    "Key with alias '" + privateKeyAlias + "' already exists. " +
-                    "Delete it first with deleteKey() or set allowOverwrite=true.");
-                return;
-            }
+            // Keys are always allowed to be overwritten for simplicity.
+            // If a key with the same alias exists, it will be replaced.
 
             // App can request hardware, but module decides based on TLS compatibility
             boolean requestedHardwareKey = params.hasKey("useHardwareKey") ? params.getBoolean("useHardwareKey") : false;
@@ -436,9 +476,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
             currentStep = "result serialization";
             StringWriter csrWriter = new StringWriter();
-            JcaPEMWriter pemWriter = new JcaPEMWriter(csrWriter);
-            pemWriter.writeObject(csr);
-            pemWriter.close();
+            try (JcaPEMWriter pemWriter = new JcaPEMWriter(csrWriter)) {
+                pemWriter.writeObject(csr);
+            }
 
             com.facebook.react.bridge.WritableMap response = com.facebook.react.bridge.Arguments.createMap();
             response.putString("csr", csrWriter.toString());
@@ -594,18 +634,45 @@ public class CSRModule extends ReactContextBaseJavaModule {
         softwareKeyStore.setKeyEntry(
             privateKeyAlias,
             keyPair.getPrivate(),
-            "".toCharArray(),
+            "".toCharArray(), // See security note below
             new java.security.cert.Certificate[] { selfSignedCert }
         );
 
         // Save keystore to encrypted file
+        // EncryptedFile.openFileOutput() throws if file already exists, so delete first
+        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+        if (keystoreFile.exists() && !keystoreFile.delete()) {
+            throw new IOException("Failed to delete existing keystore file before rewrite");
+        }
+
         try (FileOutputStream fos = encFile.openFileOutput()) {
-            softwareKeyStore.store(fos, "".toCharArray());
+            softwareKeyStore.store(fos, "".toCharArray()); // See security note below
         }
 
         // Ensure file permissions are set after creation
-        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
         setSecureFilePermissions(keystoreFile);
+
+        /*
+         * SECURITY NOTE: Empty PKCS12 password rationale
+         *
+         * The PKCS12 keystore uses an empty password ("".toCharArray()) for both
+         * KeyStore.load() and KeyStore.store(). This is acceptable because:
+         *
+         * 1. The containing EncryptedFile provides AES256-GCM encryption at rest
+         * 2. The encryption key is hardware-backed in Android Keystore
+         * 3. The file is protected by Android app sandbox (mode 0600)
+         * 4. Backup exclusion rules prevent cloud/backup exposure
+         *
+         * The PKCS12 container structure remains (providing key/cert bundling),
+         * but the encryption layer is handled by EncryptedFile instead of PKCS12's
+         * password-based encryption. This design prioritizes hardware-backed
+         * encryption over password-based encryption.
+         *
+         * Defense-in-depth alternative: Derive a device-unique PKCS12 password from
+         * a separate Android Keystore AES key. This adds a second encryption layer
+         * but increases complexity and may not significantly improve security given
+         * the EncryptedFile layer already uses hardware-backed keys.
+         */
     }
 
     @ReactMethod
@@ -639,9 +706,18 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     if (softwareKeyStore.containsAlias(privateKeyAlias)) {
                         softwareKeyStore.deleteEntry(privateKeyAlias);
 
+                        // EncryptedFile.openFileOutput() throws if file already exists, so delete first
+                        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+                        if (keystoreFile.exists() && !keystoreFile.delete()) {
+                            throw new IOException("Failed to delete existing keystore file before rewrite");
+                        }
+
                         try (FileOutputStream fos = encFile.openFileOutput()) {
                             softwareKeyStore.store(fos, "".toCharArray());
                         }
+
+                        // Restore file permissions after rewrite
+                        setSecureFilePermissions(keystoreFile);
 
                         deleted = true;
                         Log.d(MODULE_NAME, "Deleted software key: " + privateKeyAlias);

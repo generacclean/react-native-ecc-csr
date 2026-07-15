@@ -3,12 +3,28 @@
     <!--
       Library manifest - these attributes are merged with the consuming app's manifest
 
-      CRITICAL SECURITY: Backup exclusion rules are defined in backup_rules.xml
-      The consuming app should either:
-      1. Set android:allowBackup="false" (disables all backups)
-      2. Include android:fullBackupContent="@xml/backup_rules" (selective exclusion)
+      CRITICAL SECURITY: Backup exclusion rules are defined in TWO files:
+      1. backup_rules.xml - Legacy format for Android 11 and below
+      2. data_extraction_rules.xml - New format for Android 12+ (API 31+)
 
-      This library provides backup_rules.xml which will be automatically merged
-      if the consuming app uses fullBackupContent.
+      The consuming app MUST include BOTH:
+        android:fullBackupContent="@xml/backup_rules"             (API 23-30)
+        android:dataExtractionRules="@xml/data_extraction_rules"  (API 31+)
+
+      Without BOTH attributes, the software keystore WILL be backed up on some devices:
+      - Without fullBackupContent: Backed up on Android 6-11
+      - Without dataExtractionRules: Backed up on Android 12+
+
+      Alternative: Set android:allowBackup="false" to disable all backups (may break
+      user data backup/restore for the app).
+
+      Example consuming app AndroidManifest.xml:
+        <application
+            android:allowBackup="true"
+            android:fullBackupContent="@xml/backup_rules"
+            android:dataExtractionRules="@xml/data_extraction_rules">
+
+      This library provides both XML files, which will be automatically merged if
+      the consuming app references them.
     -->
 </manifest>

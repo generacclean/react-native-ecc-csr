@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Backup exclusion rules for CSR module
+  Backup exclusion rules for CSR module (LEGACY FORMAT - Android 6-11 only)
 
   CRITICAL SECURITY: Exclude software keystore from device backups
+
+  This file uses the legacy <full-backup-content> format for Android 6-11 (API 23-30).
+  For Android 12+ (API 31+), the new data_extraction_rules.xml is required.
+
+  IMPORTANT: Consuming apps MUST include BOTH:
+    android:fullBackupContent="@xml/backup_rules"
+    android:dataExtractionRules="@xml/data_extraction_rules"
 
   Without this, private keys would be:
   - Uploaded to Google Drive / cloud backup services

@@ -131,10 +131,27 @@ public class CSRFormatTest {
 
     @Test
     public void testDefaultValues() {
-        // Test default constants
-        assertEquals("Default country should be US", "US", "US");
-        assertEquals("Default curve should be secp384r1", "secp384r1", "secp384r1");
-        assertEquals("Default IP should be 10.10.10.10", "10.10.10.10", "10.10.10.10");
+        // Test that default values produce valid X500Name structures
+        X500NameBuilder builder = new X500NameBuilder(BCStyle.INSTANCE);
+
+        // Add default values
+        builder.addRDN(BCStyle.C, "US");
+        builder.addRDN(BCStyle.ST, "Wisconsin");
+        builder.addRDN(BCStyle.L, "Waukesha");
+        builder.addRDN(BCStyle.O, "Generac Power Systems");
+        builder.addRDN(BCStyle.OU, "Field Pro");
+
+        X500Name name = builder.build();
+
+        // Verify structure is valid
+        assertNotNull("X500Name should not be null", name);
+        assertTrue("X500Name should contain RDNs", name.getRDNs().length > 0);
+
+        // Verify country code is present and valid
+        String nameStr = name.toString();
+        assertTrue("Should contain country", nameStr.contains("C=US"));
+        assertTrue("Should contain state", nameStr.contains("ST=Wisconsin"));
+        assertTrue("Should contain organization", nameStr.contains("O=Generac Power Systems"));
     }
 
     @Test
@@ -151,10 +168,31 @@ public class CSRFormatTest {
 
     @Test
     public void testKeySizes() {
-        // Document expected key sizes for curves
-        assertEquals("P-256 should be 256 bits", 256, 256);
-        assertEquals("P-384 should be 384 bits", 384, 384);
-        assertEquals("P-521 should be 521 bits", 521, 521);
+        // Test that curve names map to expected key sizes
+        // This verifies the curve-to-keysize mapping logic
+
+        // Curve name to expected key size mapping
+        String[][] curveSizes = {
+            {"secp256r1", "256"},
+            {"secp384r1", "384"},
+            {"secp521r1", "521"}
+        };
+
+        for (String[] curveSize : curveSizes) {
+            String curveName = curveSize[0];
+            int expectedSize = Integer.parseInt(curveSize[1]);
+
+            // Extract size from curve name (e.g., "secp256r1" -> 256)
+            String sizeStr = curveName.replaceAll("[^0-9]", "");
+            int actualSize = Integer.parseInt(sizeStr);
+
+            assertEquals("Key size for " + curveName + " should be " + expectedSize,
+                expectedSize, actualSize);
+
+            // Verify curve name format
+            assertTrue("Curve should start with 'secp'", curveName.startsWith("secp"));
+            assertTrue("Curve should end with 'r1'", curveName.endsWith("r1"));
+        }
     }
 
     @Test

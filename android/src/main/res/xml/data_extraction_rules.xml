@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Data extraction rules for Android 12+ (API 31+)
+
+  CRITICAL SECURITY: Exclude software keystore from device backups and transfers
+
+  Android 12+ uses a new backup framework that requires <data-extraction-rules>
+  instead of the legacy <full-backup-content> format. Without this file, the
+  legacy backup_rules.xml is silently ignored on Android 12+ devices, and the
+  keystore file WILL be backed up.
+
+  This file must be referenced in AndroidManifest.xml via:
+    android:dataExtractionRules="@xml/data_extraction_rules"
+
+  See: https://developer.android.com/guide/topics/data/autobackup#include-exclude-android-12
+-->
+<data-extraction-rules>
+    <!--
+      Cloud backup rules (Google Drive, cloud backup services)
+    -->
+    <cloud-backup>
+        <!-- Exclude software keystore files from cloud backups -->
+        <exclude domain="file" path="software_keys.p12"/>
+        <exclude domain="file" path="software_keys_v1.p12"/>
+
+        <!-- Exclude any potential backup/temp files -->
+        <exclude domain="file" path="software_keys.p12.bak"/>
+        <exclude domain="file" path="software_keys.p12.tmp"/>
+    </cloud-backup>
+
+    <!--
+      Device-to-device transfer rules (Android setup wizard, phone cloning)
+    -->
+    <device-transfer>
+        <!-- Exclude software keystore files from device transfers -->
+        <exclude domain="file" path="software_keys.p12"/>
+        <exclude domain="file" path="software_keys_v1.p12"/>
+
+        <!-- Exclude any potential backup/temp files -->
+        <exclude domain="file" path="software_keys.p12.bak"/>
+        <exclude domain="file" path="software_keys.p12.tmp"/>
+    </device-transfer>
+</data-extraction-rules>
