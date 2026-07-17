@@ -12,7 +12,7 @@ All security and quality issues have been addressed. The most critical security 
 - 🔒 Software keys now encrypted at rest with hardware-backed AES256-GCM
 - 🔐 Race condition protection via synchronization
 - 📦 Automatic backup exclusion configured
-- ✅ Key collision detection prevents overwrites
+- ✅ Keys always overwrite (simplicity over collision detection)
 - 🛡️ Explicit file permissions enforced
 - 📝 Comprehensive security documentation
 
@@ -52,8 +52,8 @@ BEFORE (v1.1.0)                      AFTER (v1.2.0)
                                                │
                                                ▼
                                     ┌────────────────────┐
-                                    │ software_keys_v1   │
-                                    │    .p12            │
+                                    │ software_keys.p12  │
+                                    │                    │
                                     │ File on disk       │
                                     │ Mode: 0600         │
                                     │ ✅ AES256 encrypted│
@@ -190,7 +190,7 @@ Request lock          Wait...               Wait...
 <!-- backup_rules.xml -->
 <full-backup-content>
     <exclude domain="file" path="software_keys.p12"/>
-    <exclude domain="file" path="software_keys_v1.p12"/>
+    <exclude domain="file" path="software_keys.p12"/>
     <exclude domain="file" path="software_keys.p12.bak"/>
     <exclude domain="file" path="software_keys.p12.tmp"/>
 </full-backup-content>
@@ -240,36 +240,34 @@ private void setSecureFilePermissions(File file) {
 
 ---
 
-### ✅ CRITICAL #5: Key Collision Detection
+### ✅ CRITICAL #5: Dual-Store Collision Prevention
 
 **Problem:**
 ```java
-// BEFORE - Silently overwrites existing keys!
-keyPairGenerator.generateKeyPair(); // Overwrites if alias exists
+// BEFORE - Same alias could exist in both hardware and software keystores
+// getPublicKey() would return hardware key while CSR was signed with software key
 ```
 
 **Solution:**
 ```java
-// AFTER - Check before generation
-if (!allowOverwrite && keyExistsSynchronous(privateKeyAlias)) {
-    promise.reject("KEY_EXISTS",
-        "Key with alias '" + privateKeyAlias + "' already exists. " +
-        "Delete it first with deleteKey() or set allowOverwrite=true.");
-    return;
+// AFTER - Delete stale key from opposite store before generation
+if (useHardwareKey) {
+    // About to use hardware, delete any software key with same alias
+    deleteSoftwareKeyIfExists(privateKeyAlias);
+} else {
+    // About to use software, delete any hardware key with same alias
+    deleteHardwareKeyIfExists(privateKeyAlias);
 }
 ```
 
-**New Parameter:**
-```typescript
-interface CSRParams {
-  // ... existing params
-  allowOverwrite?: boolean; // Default: false
-}
-```
+**Design Decision:**
+- Keys always overwrite for simplicity (no `allowOverwrite` parameter)
+- The module comment states: "Keys are always allowed to be overwritten for simplicity"
+- Callers should use `keyExists()` first if they need collision detection
 
 **Files Changed:**
-- `CSRModule.java` - Added `keyExistsSynchronous()` and collision check
-- `src/index.ts` - Added `allowOverwrite` parameter to TypeScript interface
+- `CSRModule.java` - Added dual-store collision prevention logic
+- Helper methods: `deleteSoftwareKeyIfExists()`, `deleteHardwareKeyIfExists()`
 
 ---
 
@@ -365,7 +363,7 @@ private static final String SOFTWARE_KEYSTORE_FILE = "software_keys.p12";
 **After:**
 ```java
 // Added versioning for future migrations
-private static final String SOFTWARE_KEYSTORE_FILE = "software_keys_v1.p12";
+private static final String SOFTWARE_KEYSTORE_FILE = "software_keys.p12";
 ```
 
 ---
@@ -530,7 +528,8 @@ private KeyPair generateSoftwareKeyPair(String alias, String curve) { }
 private void storeSoftwareKey(String alias, KeyPair keyPair) { }
 private EncryptedFile getEncryptedKeystoreFile(Context context) { }
 private void setSecureFilePermissions(File file) { }
-private boolean keyExistsSynchronous(String alias) { }
+private void deleteSoftwareKeyIfExists(String alias) { }
+private void deleteHardwareKeyIfExists(String alias) { }
 private boolean isValidIPAddress(String ip) { }
 private String sanitizeDNValue(String value) { }
 ```
@@ -581,10 +580,10 @@ describe('CSRModule v1.2.0', () => {
     it('should properly queue operations');
   });
 
-  describe('Key Collision', () => {
-    it('should reject duplicate alias by default');
-    it('should allow overwrite when allowOverwrite=true');
-    it('should preserve existing key when rejected');
+  describe('Dual-Store Collision Prevention', () => {
+    it('should delete stale hardware key when generating software key');
+    it('should delete stale software key when generating hardware key');
+    it('should allow overwriting keys (always enabled)');
   });
 
   describe('Input Validation', () => {
@@ -632,7 +631,7 @@ describe('CSRModule v1.2.0', () => {
 # 1. Test backup exclusion
 adb backup -f backup.ab com.your.app
 tar -xvf backup.ab
-# Verify software_keys_v1.p12 is NOT present
+# Verify software_keys.p12 is NOT present
 
 # 2. Test file permissions
 adb shell
@@ -648,7 +647,7 @@ unzip -l app/build/outputs/apk/release/app-release.apk | grep bouncycastle
 # 4. Test encryption
 adb shell
 run-as com.your.app
-cat files/software_keys_v1.p12
+cat files/software_keys.p12
 # Should see binary gibberish (encrypted)
 ```
 
@@ -690,18 +689,24 @@ cat files/software_keys_v1.p12
 
 **NONE!** API is 100% backward compatible.
 
-### Automatic Migration
+### Migration Notes
 
-The module automatically handles migration:
+**Important:** There is NO automatic migration from v1.1.0 to v1.2.0:
 
-1. **First launch after update:**
-   - Old keystore file: `software_keys.p12`
-   - New keystore file: `software_keys_v1.p12` (encrypted)
-   - On first access, keys are transparently re-encrypted
+1. **Keystore filename unchanged:** `software_keys.p12`
+   - The filename remains the same between versions
+   - Old unencrypted keystores are handled via corruption detection
 
-2. **No user action required**
+2. **Corruption handling:**
+   - If an old unencrypted keystore is found, it's detected as corrupt
+   - The module logs a warning and deletes the corrupt file
+   - A new encrypted keystore is created
+   - **Existing keys are NOT preserved** - devices must re-provision
 
-3. **Existing keys remain accessible**
+3. **Recommended approach:**
+   - Deploy this version to test devices first
+   - Keys will need to be regenerated on first use
+   - Plan for re-provisioning in production rollout
 
 ### What Apps Need to Do
 
@@ -829,16 +834,17 @@ Without this, **private keys will be backed up** to cloud storage.
 ### New Files
 ```
 ✨ android/src/main/res/xml/backup_rules.xml
-✨ android/src/main/AndroidManifest.xml
-✨ FIXES_APPLIED_v1.2.0.md (this document)
+✨ android/src/main/res/xml/data_extraction_rules.xml
+✨ android/src/main/AndroidManifest.xml (updated)
+✨ RELEASE_NOTES_v1.2.0.md (this document)
 ```
 
 ### Modified Files
 ```
-📝 android/build.gradle (+1 dependency)
+📝 android/build.gradle (+1 dependency: androidx.security:security-crypto)
 📝 android/proguard-rules.pro (more specific rules)
 📝 android/src/main/java/com/ecccsr/CSRModule.java (major refactor)
-📝 src/index.ts (+allowOverwrite parameter)
+📝 ios/CSRModule.m (aligned DN defaults with Android)
 📝 README.md (comprehensive security updates)
 📝 package.json (version → 1.2.0)
 ```

@@ -5,7 +5,8 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:8.1.0'
+        // Upgraded to 8.6.0 to support Gradle 9.0.0 and compileSdk 36
+        classpath 'com.android.tools.build:gradle:8.6.0'
     }
 }
 

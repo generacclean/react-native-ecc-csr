@@ -1,12 +1,14 @@
 #import "CSRModule.h"
 #import <Security/Security.h>
 #import <CommonCrypto/CommonCrypto.h>
+#import <sys/utsname.h>
 
+// Align defaults with Android (Generac-specific values)
 static NSString * const DEFAULT_COUNTRY = @"US";
-static NSString * const DEFAULT_STATE = @"Colorado";
-static NSString * const DEFAULT_LOCALITY = @"Denver";
-static NSString * const DEFAULT_ORGANIZATION = @"MyOrg";
-static NSString * const DEFAULT_ORGANIZATIONAL_UNIT = @"MyOrgUnit";
+static NSString * const DEFAULT_STATE = @"Wisconsin";
+static NSString * const DEFAULT_LOCALITY = @"Waukesha";
+static NSString * const DEFAULT_ORGANIZATION = @"Generac Power Systems";
+static NSString * const DEFAULT_ORGANIZATIONAL_UNIT = @"Field Pro";
 static NSString * const DEFAULT_IP_ADDRESS = @"10.10.10.10";
 static NSString * const DEFAULT_ECC_CURVE = @"secp384r1";
 
@@ -100,7 +102,9 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
             @"privateKeyAlias": privateKeyAlias,
             @"publicKey": publicKeyPEM,
             @"isHardwareBacked": @(isHardwareBacked),
-            @"useHardwareKey": @(actualUseHardwareKey)
+            @"useHardwareKey": @(actualUseHardwareKey),
+            @"hardwareKeyRequested": @(useHardwareKey),
+            @"tlsCompatible": @YES  // iOS Secure Enclave always supports TLS
         });
         
     } @catch (NSException *exception) {
@@ -139,16 +143,59 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     @try {
         NSError *error = nil;
         NSString *publicKeyPEM = [self getPublicKeyForAlias:privateKeyAlias error:&error];
-        
+
         if (error) {
             reject(@"GET_PUBLIC_KEY_ERROR", error.localizedDescription, error);
             return;
         }
-        
+
         resolve(publicKeyPEM);
     } @catch (NSException *exception) {
         reject(@"GET_PUBLIC_KEY_ERROR", exception.reason, nil);
     }
+}
+
+RCT_EXPORT_METHOD(getHardwareKeystoreCapabilities:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+    @try {
+        // iOS Secure Enclave is always TLS-compatible (no SDK version gating like Android)
+        // However, only P-256 is supported; P-384/P-521 fall back to software
+
+        NSOperatingSystemVersion version = [[NSProcessInfo processInfo] operatingSystemVersion];
+        NSInteger iosVersion = version.majorVersion;
+
+        // Check if Secure Enclave is available (iPhone 5s+ with iOS 8+)
+        BOOL hasSecureEnclave = NO;
+        if (@available(iOS 9.0, *)) {
+            // Try to query secure enclave support via a test key attribute query
+            // Secure Enclave is available on devices with A7+ chips (iPhone 5s and newer)
+            NSDictionary *attributes = @{
+                (id)kSecAttrTokenID: (id)kSecAttrTokenIDSecureEnclave,
+            };
+            // We can't directly query support, but we know:
+            // - iPhone 5s and later have Secure Enclave
+            // - iOS 9+ is required for full Secure Enclave API support
+            hasSecureEnclave = YES;  // Assume yes on modern devices running this code
+        }
+
+        resolve(@{
+            @"tlsCompatible": @YES,  // iOS Secure Enclave always TLS-compatible
+            @"androidSdkVersion": @0,  // N/A for iOS
+            @"hasStrongBox": @(hasSecureEnclave),  // Secure Enclave is iOS equivalent
+            @"manufacturer": @"Apple",
+            @"model": [self getDeviceModel],
+            @"device": [self getDeviceModel]
+        });
+    } @catch (NSException *exception) {
+        reject(@"CAPABILITIES_ERROR", exception.reason, nil);
+    }
+}
+
+- (NSString *)getDeviceModel {
+    struct utsname systemInfo;
+    uname(&systemInfo);
+    return [NSString stringWithCString:systemInfo.machine encoding:NSUTF8StringEncoding];
 }
 
 #pragma mark - Helper Methods

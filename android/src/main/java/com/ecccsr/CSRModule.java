@@ -102,7 +102,31 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 return;
             }
 
-            // Remove ALL existing BC providers to avoid conflicts
+            /*
+             * IMPORTANT: Process-wide security provider modification
+             *
+             * Security.removeProvider("BC") removes the system BouncyCastle provider
+             * from the ENTIRE JVM process, not just this module. This affects all
+             * code in the host application that uses cryptographic operations.
+             *
+             * WHY THIS IS NECESSARY:
+             * - Android includes a stripped-down BouncyCastle provider that only supports
+             *   RSA, DSA, and DH algorithms - NOT Elliptic Curve (EC)
+             * - If we don't remove it, algorithm lookups by name "BC" will find the
+             *   system provider first and fail with NoSuchAlgorithmException for EC
+             * - This module always passes FULL_BC_PROVIDER directly (not by name) to
+             *   avoid depending on provider ordering, but removal prevents accidental
+             *   usage of the system BC by other code
+             *
+             * IMPACT ON OTHER LIBRARIES:
+             * - Other crypto libraries in the app will use our full BC provider instead
+             *   of the system's stripped version
+             * - This is generally BENEFICIAL (more algorithms available) but could
+             *   theoretically cause compatibility issues if other code depends on
+             *   specific system BC behavior
+             * - If this causes conflicts, consider NOT removing the system provider
+             *   and only using FULL_BC_PROVIDER explicitly throughout this module
+             */
             Security.removeProvider("BC");
 
             // Insert our full provider at position 1 (highest priority)
@@ -242,11 +266,25 @@ public class CSRModule extends ReactContextBaseJavaModule {
             InetAddress addr = InetAddress.getByName(trimmed);
 
             // Verify input is a literal IP address, not a hostname that resolved
-            // For IPv6, strip brackets for comparison
+            // For IPv6: normalize both sides by parsing and re-stringifying
+            // This handles compressed forms (2001:db8::1) vs uncompressed (2001:db8:0:0:0:0:0:1)
             String resolvedAddr = addr.getHostAddress();
             String inputForComparison = trimmed.replace("[", "").replace("]", "");
 
-            return resolvedAddr.equals(trimmed) || resolvedAddr.equals(inputForComparison);
+            // Try direct comparison first (handles IPv4 and exact IPv6 matches)
+            if (resolvedAddr.equals(inputForComparison)) {
+                return true;
+            }
+
+            // For IPv6, normalize both sides by re-parsing
+            // If input is a valid IP literal, parsing it should yield the same InetAddress
+            try {
+                InetAddress inputAddr = InetAddress.getByName(inputForComparison);
+                return inputAddr.equals(addr);
+            } catch (UnknownHostException e) {
+                // Input couldn't be re-parsed, likely a hostname
+                return false;
+            }
         } catch (UnknownHostException e) {
             return false;
         }
@@ -292,43 +330,6 @@ public class CSRModule extends ReactContextBaseJavaModule {
             }
         } catch (Exception e) {
             Log.w(MODULE_NAME, "Could not set file permissions explicitly (may not be supported): " + e.getMessage());
-        }
-    }
-
-    // Check if key exists before generation
-    private boolean keyExistsSynchronous(String privateKeyAlias) {
-        try {
-            // Check hardware keystore
-            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
-            keyStore.load(null);
-            if (keyStore.containsAlias(privateKeyAlias)) {
-                return true;
-            }
-        } catch (Exception e) {
-            // Continue to software keystore check
-        }
-
-        try {
-            // Check software keystore (must be synchronized)
-            synchronized (SOFTWARE_KEYSTORE_LOCK) {
-                // Explicit file existence check before constructing EncryptedFile
-                File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
-                if (!keystoreFile.exists()) {
-                    return false;
-                }
-
-                EncryptedFile encFile = getEncryptedKeystoreFile(getReactApplicationContext());
-                KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
-
-                try (FileInputStream fis = encFile.openFileInput()) {
-                    softwareKeyStore.load(fis, "".toCharArray());
-                    return softwareKeyStore.containsAlias(privateKeyAlias);
-                } catch (FileNotFoundException e) {
-                    return false;
-                }
-            }
-        } catch (Exception e) {
-            return false;
         }
     }
 
@@ -398,6 +399,21 @@ public class CSRModule extends ReactContextBaseJavaModule {
                   ", curve: " + curve + ", hardware: " + useHardwareKey);
 
             String keystoreCurve = curve;
+
+            // Delete any existing key with the same alias from the OPPOSITE keystore
+            // to prevent dual-store collision where getPublicKey returns stale key
+            currentStep = "removing stale keys";
+            try {
+                if (useHardwareKey) {
+                    // About to use hardware, delete any software key with same alias
+                    deleteSoftwareKeyIfExists(privateKeyAlias);
+                } else {
+                    // About to use software, delete any hardware key with same alias
+                    deleteHardwareKeyIfExists(privateKeyAlias);
+                }
+            } catch (Exception e) {
+                Log.w(MODULE_NAME, "Failed to delete stale key from opposite keystore: " + e.getMessage());
+            }
 
             // Generate key pair
             currentStep = "key generation";
@@ -562,8 +578,26 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
         try {
             KeyPair keyPair = keyPairGenerator.generateKeyPair();
-            Log.d(MODULE_NAME, "Hardware key pair generated successfully");
+            Log.d(MODULE_NAME, "Hardware key pair generated successfully" + (useStrongBox ? " (StrongBox)" : " (TEE)"));
             return keyPair;
+        } catch (android.security.keystore.StrongBoxUnavailableException e) {
+            // StrongBox advertised but transiently unavailable - fall back to TEE once
+            if (useStrongBox) {
+                Log.w(MODULE_NAME, "StrongBox unavailable, falling back to TEE: " + e.getMessage());
+                specBuilder.setIsStrongBoxBacked(false);
+                keyPairGenerator.initialize(specBuilder.build());
+                try {
+                    KeyPair keyPair = keyPairGenerator.generateKeyPair();
+                    Log.d(MODULE_NAME, "Hardware key pair generated successfully (TEE fallback)");
+                    return keyPair;
+                } catch (Exception retryException) {
+                    Log.e(MODULE_NAME, "TEE fallback also failed: " + retryException.getMessage());
+                    throw new Exception("Hardware key generation failed in both StrongBox and TEE. Error: " + retryException.getMessage(), retryException);
+                }
+            } else {
+                // Not using StrongBox originally, so don't retry
+                throw new Exception("Hardware key generation failed: " + e.getMessage(), e);
+            }
         } catch (Exception e) {
             Log.e(MODULE_NAME, "Hardware key generation failed: " + e.getMessage());
             throw new Exception("Hardware key generation failed. Device may not support hardware-backed keys for curve " +
@@ -620,11 +654,21 @@ public class CSRModule extends ReactContextBaseJavaModule {
         EncryptedFile encFile = getEncryptedKeystoreFile(getReactApplicationContext());
         KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
 
-        // Try to load existing keystore, create new if doesn't exist
+        // Try to load existing keystore, create new if doesn't exist or is corrupt
+        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
         try (FileInputStream fis = encFile.openFileInput()) {
             softwareKeyStore.load(fis, "".toCharArray());
         } catch (FileNotFoundException e) {
             // Keystore doesn't exist yet, create a new one
+            softwareKeyStore.load(null, null);
+        } catch (IOException | GeneralSecurityException e) {
+            // Keystore is corrupt, undecryptable, or from incompatible version
+            // (e.g., master key invalidated, OS upgrade, pre-1.2.0 plaintext file)
+            // Delete the corrupt file and start fresh
+            Log.w(MODULE_NAME, "Software keystore corrupt/undecryptable, reinitializing: " + e.getMessage());
+            if (keystoreFile.exists() && !keystoreFile.delete()) {
+                Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
+            }
             softwareKeyStore.load(null, null);
         }
 
@@ -638,15 +682,38 @@ public class CSRModule extends ReactContextBaseJavaModule {
             new java.security.cert.Certificate[] { selfSignedCert }
         );
 
-        // Save keystore to encrypted file
-        // EncryptedFile.openFileOutput() throws if file already exists, so delete first
-        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
-        if (keystoreFile.exists() && !keystoreFile.delete()) {
-            throw new IOException("Failed to delete existing keystore file before rewrite");
+        // Save keystore to encrypted file (atomic rewrite via temp file)
+        // Write to .tmp file first, then rename to prevent data loss on write failure
+        File tempKeystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE + ".tmp");
+
+        // Delete any existing temp file
+        if (tempKeystoreFile.exists() && !tempKeystoreFile.delete()) {
+            throw new IOException("Failed to delete existing temp keystore file");
         }
 
-        try (FileOutputStream fos = encFile.openFileOutput()) {
+        // Build EncryptedFile for temp path
+        MasterKey masterKey = new MasterKey.Builder(getReactApplicationContext())
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build();
+        EncryptedFile tempEncFile = new EncryptedFile.Builder(
+            getReactApplicationContext(),
+            tempKeystoreFile,
+            masterKey,
+            EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB)
+            .build();
+
+        // Write to temp file
+        try (FileOutputStream fos = tempEncFile.openFileOutput()) {
             softwareKeyStore.store(fos, "".toCharArray()); // See security note below
+        }
+
+        // Atomic rename: only delete the real file after successful write to temp
+        if (keystoreFile.exists() && !keystoreFile.delete()) {
+            throw new IOException("Failed to delete existing keystore file before atomic rename");
+        }
+
+        if (!tempKeystoreFile.renameTo(keystoreFile)) {
+            throw new IOException("Failed to atomically rename temp keystore to final path");
         }
 
         // Ensure file permissions are set after creation
@@ -698,22 +765,52 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 try {
                     EncryptedFile encFile = getEncryptedKeystoreFile(getReactApplicationContext());
                     KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
+                    File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
 
                     try (FileInputStream fis = encFile.openFileInput()) {
                         softwareKeyStore.load(fis, "".toCharArray());
+                    } catch (FileNotFoundException e) {
+                        // No software keystore exists
+                        softwareKeyStore.load(null, null);
+                    } catch (IOException | GeneralSecurityException e) {
+                        // Keystore is corrupt/undecryptable - delete and start fresh
+                        Log.w(MODULE_NAME, "Software keystore corrupt during delete, reinitializing: " + e.getMessage());
+                        if (keystoreFile.exists() && !keystoreFile.delete()) {
+                            Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
+                        }
+                        softwareKeyStore.load(null, null);
                     }
 
                     if (softwareKeyStore.containsAlias(privateKeyAlias)) {
                         softwareKeyStore.deleteEntry(privateKeyAlias);
 
-                        // EncryptedFile.openFileOutput() throws if file already exists, so delete first
-                        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
-                        if (keystoreFile.exists() && !keystoreFile.delete()) {
-                            throw new IOException("Failed to delete existing keystore file before rewrite");
+                        // Atomic rewrite via temp file to prevent data loss
+                        File tempKeystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE + ".tmp");
+
+                        if (tempKeystoreFile.exists() && !tempKeystoreFile.delete()) {
+                            throw new IOException("Failed to delete existing temp keystore file");
                         }
 
-                        try (FileOutputStream fos = encFile.openFileOutput()) {
+                        MasterKey masterKey = new MasterKey.Builder(getReactApplicationContext())
+                            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                            .build();
+                        EncryptedFile tempEncFile = new EncryptedFile.Builder(
+                            getReactApplicationContext(),
+                            tempKeystoreFile,
+                            masterKey,
+                            EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB)
+                            .build();
+
+                        try (FileOutputStream fos = tempEncFile.openFileOutput()) {
                             softwareKeyStore.store(fos, "".toCharArray());
+                        }
+
+                        if (keystoreFile.exists() && !keystoreFile.delete()) {
+                            throw new IOException("Failed to delete existing keystore file before atomic rename");
+                        }
+
+                        if (!tempKeystoreFile.renameTo(keystoreFile)) {
+                            throw new IOException("Failed to atomically rename temp keystore to final path");
                         }
 
                         // Restore file permissions after rewrite
@@ -824,11 +921,30 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
             // Synchronize software keystore access
             synchronized (SOFTWARE_KEYSTORE_LOCK) {
+                File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+
+                // Check file exists before trying to open it
+                if (!keystoreFile.exists()) {
+                    promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
+                    return;
+                }
+
                 EncryptedFile encFile = getEncryptedKeystoreFile(getReactApplicationContext());
                 KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
 
                 try (FileInputStream fis = encFile.openFileInput()) {
                     softwareKeyStore.load(fis, "".toCharArray());
+                } catch (FileNotFoundException e) {
+                    promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
+                    return;
+                } catch (IOException | GeneralSecurityException e) {
+                    // Keystore is corrupt/undecryptable - delete and report key not found
+                    Log.w(MODULE_NAME, "Software keystore corrupt during getPublicKey, reinitializing: " + e.getMessage());
+                    if (keystoreFile.exists() && !keystoreFile.delete()) {
+                        Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
+                    }
+                    promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found (keystore was corrupt)");
+                    return;
                 }
 
                 if (softwareKeyStore.containsAlias(privateKeyAlias)) {
@@ -872,6 +988,78 @@ public class CSRModule extends ReactContextBaseJavaModule {
             return false;
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    // Helper method to delete hardware key if it exists
+    private void deleteHardwareKeyIfExists(String privateKeyAlias) throws Exception {
+        KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+        keyStore.load(null);
+        if (keyStore.containsAlias(privateKeyAlias)) {
+            keyStore.deleteEntry(privateKeyAlias);
+            Log.d(MODULE_NAME, "Deleted stale hardware key: " + privateKeyAlias);
+        }
+    }
+
+    // Helper method to delete software key if it exists
+    private void deleteSoftwareKeyIfExists(String privateKeyAlias) throws Exception {
+        synchronized (SOFTWARE_KEYSTORE_LOCK) {
+            File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+            if (!keystoreFile.exists()) {
+                return;
+            }
+
+            EncryptedFile encFile = getEncryptedKeystoreFile(getReactApplicationContext());
+            KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
+
+            try (FileInputStream fis = encFile.openFileInput()) {
+                softwareKeyStore.load(fis, "".toCharArray());
+            } catch (FileNotFoundException e) {
+                return;
+            } catch (IOException | GeneralSecurityException e) {
+                // Keystore is corrupt - delete and return
+                Log.w(MODULE_NAME, "Software keystore corrupt during stale key deletion: " + e.getMessage());
+                if (keystoreFile.exists() && !keystoreFile.delete()) {
+                    Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
+                }
+                return;
+            }
+
+            if (softwareKeyStore.containsAlias(privateKeyAlias)) {
+                softwareKeyStore.deleteEntry(privateKeyAlias);
+
+                // Atomic rewrite via temp file
+                File tempKeystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE + ".tmp");
+
+                if (tempKeystoreFile.exists() && !tempKeystoreFile.delete()) {
+                    throw new IOException("Failed to delete existing temp keystore file");
+                }
+
+                MasterKey masterKey = new MasterKey.Builder(getReactApplicationContext())
+                    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                    .build();
+                EncryptedFile tempEncFile = new EncryptedFile.Builder(
+                    getReactApplicationContext(),
+                    tempKeystoreFile,
+                    masterKey,
+                    EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB)
+                    .build();
+
+                try (FileOutputStream fos = tempEncFile.openFileOutput()) {
+                    softwareKeyStore.store(fos, "".toCharArray());
+                }
+
+                if (keystoreFile.exists() && !keystoreFile.delete()) {
+                    throw new IOException("Failed to delete existing keystore file before atomic rename");
+                }
+
+                if (!tempKeystoreFile.renameTo(keystoreFile)) {
+                    throw new IOException("Failed to atomically rename temp keystore to final path");
+                }
+
+                setSecureFilePermissions(keystoreFile);
+                Log.d(MODULE_NAME, "Deleted stale software key: " + privateKeyAlias);
+            }
         }
     }
 }

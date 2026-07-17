@@ -325,7 +325,7 @@ const result: CSRResult = await CSRModule.generateCSR(params);
 
 - `org.bouncycastle:bcprov-jdk18on:1.76` - Cryptographic provider with EC support
 - `org.bouncycastle:bcpkix-jdk18on:1.76` - PKI and certificate utilities
-- `androidx.security:security-crypto:1.0.0` - EncryptedFile for keystore encryption
+- `androidx.security:security-crypto:1.1.0` - EncryptedFile for keystore encryption at rest
 
 These are automatically included by the module as transitive dependencies.
 
@@ -443,21 +443,68 @@ Understanding the security implications of different key storage methods is impo
    await CSRModule.deleteKey("old-key-alias");
    ```
 
-4. **Handle Device Backups** ⚠️ **CRITICAL**
-   - The module provides `backup_rules.xml` which automatically excludes the keystore file
-   - **You MUST configure your app's manifest** to use backup rules:
+4. **Handle Device Backups** ⚠️ **CRITICAL - MUST CONFIGURE IN YOUR APP**
+   
+   The module provides `backup_rules.xml` and `data_extraction_rules.xml`, but **these files do NOT automatically protect your app** unless you wire them into your app's manifest.
+   
+   **For Native Android Apps (AndroidManifest.xml):**
    ```xml
-   <!-- Option 1: Disable all backups (simplest) -->
-   <application android:allowBackup="false" ...>
-
-   <!-- Option 2: Use selective backup with module's rules (recommended) -->
-   <application android:fullBackupContent="@xml/backup_rules" ...>
+   <application
+       android:allowBackup="true"
+       android:fullBackupContent="@xml/backup_rules"
+       android:dataExtractionRules="@xml/data_extraction_rules">
+       <!-- OR for maximum security: -->
+       android:allowBackup="false">
+   </application>
    ```
-   - Without this, **private keys will be uploaded to cloud backups** (Google Drive, etc.)
-   - The module's `backup_rules.xml` excludes:
-     - `software_keys.p12` (legacy)
-     - `software_keys_v1.p12` (current)
-     - Backup and temp files
+   
+   **For Expo/React Native Apps (app.json or app.config.js):**
+   
+   You **MUST** create a config plugin to merge the backup exclusion rules:
+   
+   ```javascript
+   // app.config.js or plugins/android-backup-exclusion.js
+   const { withAndroidManifest } = require('@expo/config-plugins');
+   
+   module.exports = function withBackupExclusion(config) {
+     return withAndroidManifest(config, async (config) => {
+       const androidManifest = config.modResults.manifest;
+       const application = androidManifest.application[0];
+       
+       // Reference the backup rules from the library
+       application.$['android:fullBackupContent'] = '@xml/backup_rules';
+       application.$['android:dataExtractionRules'] = '@xml/data_extraction_rules';
+       
+       return config;
+     });
+   };
+   
+   // Then in app.config.js:
+   module.exports = {
+     expo: {
+       plugins: [
+         './plugins/android-backup-exclusion'
+       ]
+     }
+   };
+   ```
+   
+   **Why This Matters:**
+   - Without manifest configuration, the library's backup rules are **NOT applied**
+   - Your software keystore **WILL be uploaded to Google Drive** and device-to-device transfer
+   - This exposes encrypted keys to cloud storage and backup infrastructure
+   - Android 12+ requires `data_extraction_rules.xml` (the old `backup_rules.xml` is ignored)
+   
+   **What the module excludes:**
+   - `software_keys.p12` (legacy filename)
+   - `software_keys.p12.tmp` (temporary write file)
+   - Any files matching the keystore pattern
+   
+   **Verification:**
+   ```bash
+   # Check if backup rules are applied in your built APK
+   apktool d app-release.apk
+   grep -r "backup_rules\|data_extraction_rules" app-release/AndroidManifest.xml
    ```
 
 5. **Monitor Key Storage Type**
