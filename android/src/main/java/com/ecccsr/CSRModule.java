@@ -276,15 +276,22 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 return true;
             }
 
-            // For IPv6, normalize both sides by re-parsing
-            // If input is a valid IP literal, parsing it should yield the same InetAddress
-            try {
-                InetAddress inputAddr = InetAddress.getByName(inputForComparison);
-                return inputAddr.equals(addr);
-            } catch (UnknownHostException e) {
-                // Input couldn't be re-parsed, likely a hostname
-                return false;
+            // For IPv6 compressed addresses, normalize both sides by re-parsing
+            // Only do this for inputs that look like IPv6 (contain ':')
+            // to avoid accepting hostnames that resolve to the same IP
+            if (inputForComparison.contains(":")) {
+                // If input is a valid IPv6 literal, parsing it should yield the same InetAddress
+                try {
+                    InetAddress inputAddr = InetAddress.getByName(inputForComparison);
+                    return inputAddr.equals(addr);
+                } catch (UnknownHostException e) {
+                    // Input couldn't be re-parsed, likely invalid
+                    return false;
+                }
             }
+
+            // Not IPv4 match, not IPv6 literal - reject as hostname
+            return false;
         } catch (UnknownHostException e) {
             return false;
         }
