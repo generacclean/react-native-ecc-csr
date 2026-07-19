@@ -20,11 +20,31 @@ public class InputValidationTest {
             InetAddress addr = InetAddress.getByName(trimmed);
 
             // Verify input is a literal IP address, not a hostname that resolved
-            // For IPv6, strip brackets for comparison
+            // For IPv6: normalize both sides by parsing and re-stringifying
+            // This handles compressed forms (2001:db8::1) vs uncompressed (2001:db8:0:0:0:0:0:1)
             String resolvedAddr = addr.getHostAddress();
             String inputForComparison = trimmed.replace("[", "").replace("]", "");
 
-            return resolvedAddr.equals(trimmed) || resolvedAddr.equals(inputForComparison);
+            // Try direct comparison first (handles IPv4 and exact IPv6 matches)
+            if (resolvedAddr.equals(inputForComparison)) {
+                return true;
+            }
+
+            // For IPv6 compressed addresses, normalize both sides by re-parsing
+            // Only do this for inputs that look like IPv6 (contain ':')
+            // to avoid accepting hostnames that resolve to the same IP
+            if (inputForComparison.contains(":")) {
+                // If input is a valid IPv6 literal, parsing it should yield the same InetAddress
+                try {
+                    InetAddress inputAddr = InetAddress.getByName(inputForComparison);
+                    return inputAddr.equals(addr);
+                } catch (UnknownHostException e) {
+                    // Input couldn't be re-parsed, likely invalid
+                    return false;
+                }
+            }
+
+            return false;
         } catch (UnknownHostException e) {
             return false;
         }
