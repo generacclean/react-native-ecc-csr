@@ -180,6 +180,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
             if (keystoreFile.renameTo(corruptedFile)) {
                 Log.w(MODULE_NAME, "Moved corrupt keystore to: " + corruptedFile.getName());
+
+                // Clean up old .corrupted files (keep only the most recent 3)
+                cleanupCorruptedFiles(keystoreFile.getParentFile(), keystoreFile.getName());
             } else {
                 // If rename fails, delete the corrupt file as last resort
                 Log.w(MODULE_NAME, "Failed to rename corrupt keystore, deleting it");
@@ -583,12 +586,14 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     deleteHardwareKeyIfExists(privateKeyAlias);
                 }
             } catch (Exception e) {
-                // Escalate stale key deletion failure to error - this could cause dual-store collision
-                String errorMsg = "Failed to delete stale key from opposite keystore: " + e.getMessage() +
-                                ". This may cause getPublicKey() to return wrong key.";
-                Log.e(MODULE_NAME, errorMsg, e);
-                promise.reject("STALE_KEY_DELETION_ERROR", errorMsg, e);
-                return;
+                // Log stale key deletion failure but continue - this is a cleanup operation
+                // and shouldn't block the main operation. deleteSoftwareKeyIfExists() already
+                // swallows exceptions internally, so this only catches deleteHardwareKeyIfExists()
+                // failures (e.g., transient Android Keystore unavailability). For software key
+                // generation, blocking on hardware keystore failures is overly strict.
+                Log.w(MODULE_NAME, "Failed to delete stale key from opposite keystore (continuing): " +
+                      e.getMessage() + ". May cause dual-store collision if key exists.", e);
+                // Continue with key generation instead of rejecting
             }
 
             // Generate key pair
@@ -1041,6 +1046,46 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 // loadSoftwareKeyStore() handles corruption internally; log unexpected errors
                 Log.w(MODULE_NAME, "Error deleting stale software key: " + e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Clean up old .corrupted files to prevent unbounded accumulation.
+     * Keeps only the most recent 3 corrupted files for forensics.
+     *
+     * @param directory The directory containing the files
+     * @param baseFileName The base filename (e.g., "software_keys.p12")
+     */
+    private void cleanupCorruptedFiles(File directory, String baseFileName) {
+        try {
+            // Find all .corrupted files for this keystore
+            File[] corruptedFiles = directory.listFiles((dir, name) ->
+                name.startsWith(baseFileName + ".corrupted.")
+            );
+
+            if (corruptedFiles == null || corruptedFiles.length <= 3) {
+                return; // Nothing to clean up
+            }
+
+            // Sort by last modified time (newest first)
+            java.util.Arrays.sort(corruptedFiles, (a, b) ->
+                Long.compare(b.lastModified(), a.lastModified())
+            );
+
+            // Delete all but the 3 most recent
+            int deleted = 0;
+            for (int i = 3; i < corruptedFiles.length; i++) {
+                if (corruptedFiles[i].delete()) {
+                    deleted++;
+                }
+            }
+
+            if (deleted > 0) {
+                Log.d(MODULE_NAME, "Cleaned up " + deleted + " old corrupted keystore file(s)");
+            }
+        } catch (Exception e) {
+            // Non-critical operation - log but don't throw
+            Log.w(MODULE_NAME, "Error cleaning up old corrupted files: " + e.getMessage());
         }
     }
 }

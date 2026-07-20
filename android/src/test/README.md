@@ -78,7 +78,7 @@ These require full Android environment and cannot run as unit tests:
 - Actual key generation
 - Hardware keystore operations
 - Android Keystore access
-- EncryptedFile operations
+- PKCS12 keystore file operations
 - React Native bridge calls
 - File I/O with app context
 - Concurrent operations

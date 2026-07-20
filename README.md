@@ -369,7 +369,7 @@ Understanding the security implications of different key storage methods is impo
 ### Software Keys (Android)
 
 **Storage Details**:
-- Stored in PKCS12 format in app's private directory (`software_keys_v1.p12`)
+- Stored in PKCS12 format in app's private directory (`software_keys.p12`)
 - Password-protected with empty password (PKCS12 standard format)
 - **Not encrypted at rest** - relies on OS-level security only
 - File permissions explicitly set to mode 0600 (owner read/write only)
