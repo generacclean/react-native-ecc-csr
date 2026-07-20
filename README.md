@@ -6,9 +6,7 @@ A React Native module for generating Certificate Signing Requests (CSR) with Ell
 
 ### Software Keystore Security (useHardwareKey=false)
 
-**Encryption at Rest:** As of v1.2.0, software-backed keys are **encrypted at rest** using AndroidX Security's `EncryptedFile` with AES256-GCM encryption. The encryption key is stored in Android Keystore, providing hardware-backed protection for the software keystore.
-
-**Previous versions (< 1.2.0):** Keys were stored unencrypted with an empty password.
+**Storage:** Software-backed keys are stored in a password-protected PKCS12 file in the app's private directory. The file is protected by Android OS-level security (file permissions 0600, app sandboxing) but **not encrypted at rest**.
 
 **Backup Exclusion:** The keystore file is automatically excluded from device backups (see `backup_rules.xml`). However, **you must ensure your app properly configures backup settings** in `AndroidManifest.xml`:
 
@@ -23,9 +21,9 @@ A React Native module for generating Certificate Signing Requests (CSR) with Ell
 **Security Recommendations:**
 - ✅ **Production apps:** Use `useHardwareKey=true` on Android 12+ devices whenever possible
 - ✅ **Development/Testing:** Software keys are acceptable
-- ✅ **Older devices (Android 11-):** Software keys with encryption at rest are your best option
+- ⚠️ **Older devices (Android 11-):** Software keys are supported but rely on OS-level security only
 - ⚠️ **High-security requirements:** Always prefer hardware-backed keys (Android 12+)
-- ⚠️ **Compliance (HIPAA/PCI DSS):** Use hardware-backed keys or verify encrypted software keys meet requirements
+- ⚠️ **Compliance (HIPAA/PCI DSS):** Use hardware-backed keys; software keys may not meet requirements
 
 See [Security Considerations](#security-considerations) section below for detailed analysis.
 
@@ -325,7 +323,6 @@ const result: CSRResult = await CSRModule.generateCSR(params);
 
 - `org.bouncycastle:bcprov-jdk18on:1.76` - Cryptographic provider with EC support
 - `org.bouncycastle:bcpkix-jdk18on:1.76` - PKI and certificate utilities
-- `androidx.security:security-crypto:1.1.0` - EncryptedFile for keystore encryption at rest
 
 These are automatically included by the module as transitive dependencies.
 
@@ -371,31 +368,27 @@ Understanding the security implications of different key storage methods is impo
 
 ### Software Keys (Android)
 
-**🔒 Version 1.2.0+ (Current) - Encrypted at Rest:**
-
 **Storage Details**:
 - Stored in PKCS12 format in app's private directory (`software_keys_v1.p12`)
-- **Encrypted at rest** using AndroidX Security `EncryptedFile` (AES256-GCM)
-- Encryption key stored in Android Keystore (hardware-backed)
+- Password-protected with empty password (PKCS12 standard format)
+- **Not encrypted at rest** - relies on OS-level security only
 - File permissions explicitly set to mode 0600 (owner read/write only)
+- Protected by Android app sandboxing (other apps cannot access)
 - Automatically excluded from device backups (via `backup_rules.xml`)
 - Automatically deleted when app is uninstalled
 
 **Security Level**:
-- ✅ **Protected from**: Other apps, normal users, device backups
-- ✅ **Encrypted**: AES256-GCM with hardware-backed encryption key
-- ⚠️ **Vulnerable to**: Root access with Android Keystore compromise (extremely difficult)
+- ✅ **Protected from**: Other apps (sandboxing), normal users, device backups (if configured)
+- ⚠️ **Vulnerable to**: Root access, physical access with USB debugging enabled, device backups if misconfigured
+- ⚠️ **No encryption at rest**: Keys stored in plain PKCS12 format
 
 **Recommended For**:
 - Development and testing
 - Older devices (Android 11 and below where hardware TLS not supported)
-- Use cases where hardware keys not available
-- Short-to-medium term key storage
+- Use cases where hardware keys not available and threat model accepts OS-level security
+- Short-term key storage
 
-**⚠️ Version < 1.2.0 (Legacy) - Unencrypted:**
-- Stored with empty password (no encryption at rest)
-- Vulnerable to root access, device backups, physical access with debugging
-- **Upgrade to 1.2.0+ for encryption at rest**
+**Security Note**: For production use, prefer hardware-backed keys (`useHardwareKey=true`) on Android 12+ devices.
 
 ### Hardware Keys (Android)
 
@@ -521,27 +514,27 @@ Understanding the security implications of different key storage methods is impo
 
 ### Security Trade-offs
 
-| Aspect | Software Keys (v1.2.0+) | Hardware Keys |
-|--------|-------------------------|---------------|
-| **Encryption at Rest** | ✅ AES256-GCM (hardware-backed key) | ✅ Hardware-encrypted |
-| **Root Protection** | ⚠️ Protected (requires Keystore compromise) | ✅ Fully protected |
+| Aspect | Software Keys | Hardware Keys |
+|--------|---------------|---------------|
+| **Encryption at Rest** | ❌ No encryption (OS-level protection only) | ✅ Hardware-encrypted |
+| **Root Protection** | ❌ Vulnerable to root access | ✅ Fully protected |
 | **Backup Exposure** | ✅ Excluded (if configured) | ✅ Cannot be backed up |
 | **Device Compatibility** | ✅ All devices (API 23+) | ⚠️ Android 12+ for TLS |
 | **Performance** | ⚠️ Slower (software crypto) | ✅ Faster (hardware acceleration) |
 | **Survives Reinstall** | ❌ Deleted with app | ✅ Persists (manual delete required) |
-| **Key Extraction** | ⚠️ Possible with root + Keystore access | ✅ Impossible (hardware-bound) |
+| **Key Extraction** | ⚠️ Possible with root or physical access | ✅ Impossible (hardware-bound) |
 
-**Note:** Software keys in v1.2.0+ are significantly more secure than earlier versions due to encryption at rest.
+**Note:** Software keys rely on Android OS-level security (app sandboxing, file permissions). For production use with sensitive keys, prefer hardware-backed keys.
 
 ### Compliance & Regulatory Considerations
 
 - **FIPS 140-2**: 
   - Hardware keys in StrongBox may meet FIPS 140-2 Level 3 (device-dependent, verify specific device certification)
-  - Software keys (even encrypted) typically do NOT meet FIPS 140-2 requirements
-- **PCI DSS**: Hardware-backed keys strongly recommended for payment applications; encrypted software keys may be acceptable with risk assessment
+  - Software keys typically do NOT meet FIPS 140-2 requirements (no encryption at rest)
+- **PCI DSS**: Hardware-backed keys strongly recommended for payment applications; software keys generally NOT acceptable
 - **GDPR**: Both methods comply when proper access controls and backup exclusion are configured
-- **HIPAA**: Hardware-backed keys recommended for ePHI; encrypted software keys acceptable with documented risk analysis
-- **SOC 2**: Hardware keys preferred; software keys with encryption at rest may satisfy Type II requirements
+- **HIPAA**: Hardware-backed keys strongly recommended for ePHI; software keys require thorough risk analysis and may not be acceptable
+- **SOC 2**: Hardware keys preferred; software keys may require additional compensating controls
 
 **Recommendation:** Always verify compliance requirements with your security/compliance team before deployment.
 

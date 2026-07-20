@@ -872,8 +872,6 @@ public class CSRModule extends ReactContextBaseJavaModule {
                         deleted = true;
                         Log.d(MODULE_NAME, "Deleted software key: " + privateKeyAlias);
                     }
-                } catch (FileNotFoundException e) {
-                    // Keystore file doesn't exist, nothing to delete
                 } catch (Exception e) {
                     Log.w(MODULE_NAME, "Error accessing software keystore: " + e.getMessage());
                 }
@@ -932,12 +930,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 try {
                     KeyStore softwareKeyStore = loadSoftwareKeyStore();
                     promise.resolve(softwareKeyStore.containsAlias(privateKeyAlias));
-                } catch (FileNotFoundException e) {
-                    promise.resolve(false);
                 } catch (Exception e) {
-                    // Keystore is corrupt - rename for recovery and return false
-                    Log.e(MODULE_NAME, "Software keystore corrupt in keyExists(): " + e.getMessage());
-                    handleCorruptKeystore("keyExists()");
+                    // loadSoftwareKeyStore() handles corruption internally; unexpected errors return false
+                    Log.w(MODULE_NAME, "Error checking software keystore: " + e.getMessage());
                     promise.resolve(false);
                 }
             }
@@ -982,15 +977,10 @@ public class CSRModule extends ReactContextBaseJavaModule {
                             return;
                         }
                     }
-                } catch (FileNotFoundException e) {
-                    // Keystore file doesn't exist
-                    promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
-                    return;
                 } catch (Exception e) {
-                    // Keystore is corrupt - rename for potential recovery, then report key not found
-                    Log.e(MODULE_NAME, "Software keystore corrupt during getPublicKey: " + e.getMessage());
-                    handleCorruptKeystore("getPublicKey()");
-                    promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found (keystore was corrupt and renamed for recovery)");
+                    // loadSoftwareKeyStore() handles corruption internally; unexpected errors here are retrieval failures
+                    Log.w(MODULE_NAME, "Error retrieving key from software keystore: " + e.getMessage());
+                    promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
                     return;
                 }
             }
@@ -1026,30 +1016,6 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
-    /**
-     * Handle corrupt keystore by renaming it for potential manual recovery.
-     * Returns true if file was renamed successfully, false otherwise.
-     */
-    private boolean handleCorruptKeystore(String context) {
-        File keystoreFile = getKeystoreFile();
-        if (!keystoreFile.exists()) {
-            return false;
-        }
-
-        File corruptedFile = new File(keystoreFile.getParent(),
-                                     SOFTWARE_KEYSTORE_FILE + ".corrupted." + System.currentTimeMillis());
-
-        if (keystoreFile.renameTo(corruptedFile)) {
-            Log.w(MODULE_NAME, "Keystore corrupted during " + context + ". " +
-                              "Renamed to: " + corruptedFile.getName() + " for potential manual recovery. " +
-                              "Fresh keystore will be created on next operation.");
-            return true;
-        } else {
-            Log.e(MODULE_NAME, "Failed to rename corrupt keystore file during " + context);
-            return false;
-        }
-    }
-
     // Helper method to delete hardware key if it exists
     private void deleteHardwareKeyIfExists(String privateKeyAlias) throws Exception {
         KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
@@ -1071,14 +1037,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     saveSoftwareKeyStore(softwareKeyStore);
                     Log.d(MODULE_NAME, "Deleted stale software key: " + privateKeyAlias);
                 }
-            } catch (FileNotFoundException e) {
-                // Keystore file doesn't exist, nothing to delete
-                return;
             } catch (Exception e) {
-                // Keystore is corrupt - rename for potential recovery
-                Log.e(MODULE_NAME, "Software keystore corrupt during stale key deletion: " + e.getMessage());
-                handleCorruptKeystore("deleteSoftwareKeyIfExists()");
-                return;
+                // loadSoftwareKeyStore() handles corruption internally; log unexpected errors
+                Log.w(MODULE_NAME, "Error deleting stale software key: " + e.getMessage());
             }
         }
     }
