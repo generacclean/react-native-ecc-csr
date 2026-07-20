@@ -129,8 +129,12 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     if (prefs.contains("__androidx_security_crypto_encrypted_file_keyset__")) {
                         SharedPreferences.Editor editor = prefs.edit();
                         editor.remove("__androidx_security_crypto_encrypted_file_keyset__");
-                        editor.apply();
-                        Log.i(MODULE_NAME, "Cleared stale Tink keyset from SharedPreferences");
+                        boolean success = editor.commit();  // Use commit() for synchronous write, not apply()
+                        if (success) {
+                            Log.i(MODULE_NAME, "Cleared stale Tink keyset from SharedPreferences");
+                        } else {
+                            Log.w(MODULE_NAME, "Failed to commit Tink keyset removal");
+                        }
                     }
                 } catch (Exception e) {
                     Log.w(MODULE_NAME, "Failed to clear Tink keyset (will retry on next attempt): " + e.getMessage());
@@ -142,6 +146,47 @@ public class CSRModule extends ReactContextBaseJavaModule {
     public CSRModule(ReactApplicationContext reactContext) {
         super(reactContext);
         ensureBouncyCastleProvider();
+        // Proactively check for stale Tink keyset/encrypted file on module initialization
+        checkAndCleanStaleEncryption();
+    }
+
+    /**
+     * Check if encrypted keystore file exists but can't be decrypted (stale Tink keyset).
+     * This happens after app reinstall when Android Keystore MasterKey is deleted but
+     * Tink keyset in SharedPreferences remains. Delete both to force fresh generation.
+     * Must run BEFORE any EncryptedFile is created to avoid keyset mismatch.
+     */
+    private void checkAndCleanStaleEncryption() {
+        try {
+            File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+            if (!keystoreFile.exists()) {
+                // No keystore file, nothing to check
+                return;
+            }
+
+            // File exists - try to decrypt it
+            try {
+                EncryptedFile encFile = getEncryptedKeystoreFile(getReactApplicationContext());
+                KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
+                try (FileInputStream fis = encFile.openFileInput()) {
+                    softwareKeyStore.load(fis, "".toCharArray());
+                    // Successfully decrypted - no action needed
+                    Log.d(MODULE_NAME, "Encrypted keystore file is readable - no cleanup needed");
+                    return;
+                }
+            } catch (Exception e) {
+                // File exists but can't be decrypted - stale keyset
+                Log.w(MODULE_NAME, "Encrypted keystore exists but undecryptable on startup (stale Tink keyset): " + e.getMessage());
+                invalidateCachedMasterKey();  // Clear master key cache AND Tink keyset
+                if (keystoreFile.exists() && !keystoreFile.delete()) {
+                    Log.e(MODULE_NAME, "Failed to delete stale encrypted keystore on startup");
+                } else {
+                    Log.i(MODULE_NAME, "Deleted stale encrypted keystore on startup - fresh cert will be generated");
+                }
+            }
+        } catch (Exception e) {
+            Log.w(MODULE_NAME, "Failed to check/clean stale encryption on startup: " + e.getMessage());
+        }
     }
 
     // Simplified BC provider initialization logic
@@ -358,10 +403,32 @@ public class CSRModule extends ReactContextBaseJavaModule {
         // Use cached master key to prevent "No matching key found" errors
         synchronized (MASTER_KEY_LOCK) {
             if (cachedMasterKey == null) {
+                // Check if MasterKey already exists in Android Keystore
+                String masterKeyAlias = MasterKey.DEFAULT_MASTER_KEY_ALIAS;
+                boolean masterKeyExists = false;
+                try {
+                    KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
+                    keyStore.load(null);
+                    masterKeyExists = keyStore.containsAlias(masterKeyAlias);
+                    Log.d(MODULE_NAME, "MasterKey alias '" + masterKeyAlias + "' exists in AndroidKeyStore: " + masterKeyExists);
+                } catch (Exception e) {
+                    Log.w(MODULE_NAME, "Failed to check MasterKey existence: " + e.getMessage());
+                }
+
                 Log.d(MODULE_NAME, "Creating new MasterKey instance (first use)");
                 cachedMasterKey = new MasterKey.Builder(context)
                     .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
                     .build();
+
+                // Verify it was created/exists
+                try {
+                    KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
+                    keyStore.load(null);
+                    boolean nowExists = keyStore.containsAlias(masterKeyAlias);
+                    Log.d(MODULE_NAME, "After MasterKey.Builder.build(), alias exists: " + nowExists);
+                } catch (Exception e) {
+                    Log.w(MODULE_NAME, "Failed to verify MasterKey after creation: " + e.getMessage());
+                }
             }
         }
 
