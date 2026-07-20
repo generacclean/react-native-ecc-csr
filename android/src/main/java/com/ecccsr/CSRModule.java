@@ -99,14 +99,41 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * - OS invalidates the master key (rare but possible)
      * - Keystore file was encrypted with a different master key
      *
-     * Clearing the cache allows getEncryptedKeystoreFile() to create a fresh master key
-     * on the next call, which can then decrypt/encrypt successfully.
+     * Clearing the cache AND the Tink keyset allows getEncryptedKeystoreFile() to create
+     * a fresh master key and keyset on the next call, which can then decrypt/encrypt successfully.
+     *
+     * CRITICAL: Must also clear the Tink keyset from SharedPreferences.
+     * When the master key in Android Keystore is deleted (e.g., on app reinstall),
+     * the keyset still references the old key. Creating a new master key with the same alias
+     * results in "No matching key found for the ciphertext in the stream" because the keyset
+     * was encrypted with the old key. Deleting the keyset forces Tink to generate a fresh one.
      */
     private void invalidateCachedMasterKey() {
         synchronized (MASTER_KEY_LOCK) {
             if (cachedMasterKey != null) {
                 Log.i(MODULE_NAME, "Invalidating cached master key due to decryption failure");
                 cachedMasterKey = null;
+
+                // Clear the Tink keyset from SharedPreferences
+                // This is necessary because the keyset is bound to the old master key that no longer exists.
+                // When a new MasterKey is created, Tink will generate a fresh keyset for it.
+                try {
+                    Context context = getReactApplicationContext();
+                    SharedPreferences prefs = context.getSharedPreferences(
+                        "__androidx_security_crypto_encrypted_file_pref__",
+                        Context.MODE_PRIVATE
+                    );
+
+                    // Only clear if the keyset exists (defensive check)
+                    if (prefs.contains("__androidx_security_crypto_encrypted_file_keyset__")) {
+                        SharedPreferences.Editor editor = prefs.edit();
+                        editor.remove("__androidx_security_crypto_encrypted_file_keyset__");
+                        editor.apply();
+                        Log.i(MODULE_NAME, "Cleared stale Tink keyset from SharedPreferences");
+                    }
+                } catch (Exception e) {
+                    Log.w(MODULE_NAME, "Failed to clear Tink keyset (will retry on next attempt): " + e.getMessage());
+                }
             }
         }
     }
