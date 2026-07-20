@@ -166,7 +166,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
     /**
      * Save software keystore to file atomically.
-     * Uses temp file + rename to prevent corruption from crashes during write.
+     * Uses temp file + atomic rename to prevent corruption from crashes during write.
      */
     private void saveSoftwareKeyStore(KeyStore keyStore) throws Exception {
         File keystoreFile = getKeystoreFile();
@@ -177,17 +177,31 @@ public class CSRModule extends ReactContextBaseJavaModule {
             throw new IOException("Failed to delete existing temp keystore file");
         }
 
-        // Write to temp file first
+        // Write to temp file first with secure permissions set immediately
         try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+            // Set secure permissions BEFORE writing data to minimize exposure window
+            setSecureFilePermissions(tempFile);
             keyStore.store(fos, KEYSTORE_PASSWORD);
         }
 
-        // Set secure permissions before rename
-        setSecureFilePermissions(tempFile);
-
-        // Atomic rename - overwrites old file
-        if (!tempFile.renameTo(keystoreFile)) {
-            throw new IOException("Failed to rename temp keystore to final location");
+        // Use atomic move on API 26+ for better reliability
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            try {
+                Files.move(tempFile.toPath(), keystoreFile.toPath(),
+                          java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                          java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                // Fallback to non-atomic rename
+                Log.w(MODULE_NAME, "Atomic move not supported, using File.renameTo()");
+                if (!tempFile.renameTo(keystoreFile)) {
+                    throw new IOException("Failed to rename temp keystore to final location");
+                }
+            }
+        } else {
+            // Fallback for older APIs - not truly atomic but best effort
+            if (!tempFile.renameTo(keystoreFile)) {
+                throw new IOException("Failed to rename temp keystore to final location");
+            }
         }
     }
 
@@ -374,23 +388,40 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
         try {
             String trimmed = ip.trim();
+
+            // Reject strings that look like hostnames or have suspicious patterns
+            if (trimmed.contains(" ") || trimmed.contains("//") || trimmed.contains("@")) {
+                return false;
+            }
+
             InetAddress addr = InetAddress.getByName(trimmed);
 
             // Verify input is a literal IP address, not a hostname that resolved
             // For IPv6: normalize both sides by parsing and re-stringifying
             // This handles compressed forms (2001:db8::1) vs uncompressed (2001:db8:0:0:0:0:0:1)
             String resolvedAddr = addr.getHostAddress();
+
+            // Remove IPv6 brackets for comparison
             String inputForComparison = trimmed.replace("[", "").replace("]", "");
 
+            // Remove zone ID from resolved address if present (e.g., fe80::1%eth0 -> fe80::1)
+            String resolvedForComparison = resolvedAddr.split("%")[0];
+
             // Try direct comparison first (handles IPv4 and exact IPv6 matches)
-            if (resolvedAddr.equals(inputForComparison)) {
+            if (resolvedForComparison.equals(inputForComparison)) {
                 return true;
             }
 
-            // For IPv6 compressed addresses, normalize both sides by re-parsing
-            // Only do this for inputs that look like IPv6 (contain ':')
-            // to avoid accepting hostnames that resolve to the same IP
+            // For IPv6, also check if both addresses contain colons (not port numbers)
+            // Port notation like "host:8080" should be rejected
             if (inputForComparison.contains(":")) {
+                // Count colons - IPv6 has multiple, port notation has one
+                int colonCount = inputForComparison.length() - inputForComparison.replace(":", "").length();
+                if (colonCount < 2) {
+                    // Likely "hostname:port" format, not IPv6
+                    return false;
+                }
+
                 // If input is a valid IPv6 literal, parsing it should yield the same InetAddress
                 try {
                     InetAddress inputAddr = InetAddress.getByName(inputForComparison);
@@ -412,25 +443,27 @@ public class CSRModule extends ReactContextBaseJavaModule {
     // Removed getEncryptedKeystoreFile() - no longer using EncryptedFile/Tink
     // Now using plain PKCS12 files with getKeystoreFile(), loadSoftwareKeyStore(), saveSoftwareKeyStore()
 
-    // Explicitly set file permissions
+    // Explicitly set file permissions to mode 0600
     private void setSecureFilePermissions(File file) {
         try {
-            // Set mode 0600 (owner read/write only)
-            file.setReadable(false, false);   // No one can read
-            file.setReadable(true, true);     // Owner can read
-            file.setWritable(false, false);   // No one can write
-            file.setWritable(true, true);     // Owner can write
-            file.setExecutable(false, false); // No execution
-
-            // For API 26+, use NIO for POSIX permissions (more explicit)
+            // For API 26+, use NIO POSIX permissions first (more reliable and atomic)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 Set<PosixFilePermission> perms = new HashSet<>();
                 perms.add(PosixFilePermission.OWNER_READ);
                 perms.add(PosixFilePermission.OWNER_WRITE);
                 Files.setPosixFilePermissions(file.toPath(), perms);
+            } else {
+                // Fallback for older APIs - set permissions using File methods
+                // Note: This has a race condition - file is briefly accessible with default permissions
+                file.setReadable(false, false);   // No one can read
+                file.setReadable(true, true);     // Owner can read
+                file.setWritable(false, false);   // No one can write
+                file.setWritable(true, true);     // Owner can write
+                file.setExecutable(false, false); // No execution
             }
         } catch (Exception e) {
-            Log.w(MODULE_NAME, "Could not set file permissions explicitly (may not be supported): " + e.getMessage());
+            // Escalate to error level - this is a security issue
+            Log.e(MODULE_NAME, "SECURITY WARNING: Failed to set secure file permissions on keystore: " + e.getMessage());
         }
     }
 
@@ -513,7 +546,12 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     deleteHardwareKeyIfExists(privateKeyAlias);
                 }
             } catch (Exception e) {
-                Log.w(MODULE_NAME, "Failed to delete stale key from opposite keystore: " + e.getMessage());
+                // Escalate stale key deletion failure to error - this could cause dual-store collision
+                String errorMsg = "Failed to delete stale key from opposite keystore: " + e.getMessage() +
+                                ". This may cause getPublicKey() to return wrong key.";
+                Log.e(MODULE_NAME, errorMsg, e);
+                promise.reject("STALE_KEY_DELETION_ERROR", errorMsg, e);
+                return;
             }
 
             // Generate key pair
@@ -858,14 +896,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 } catch (FileNotFoundException e) {
                     promise.resolve(false);
                 } catch (Exception e) {
-                    // Keystore is corrupt - delete and return false
-                    Log.w(MODULE_NAME, "Software keystore corrupt in keyExists(): " + e.getMessage());
-                    File keystoreFile = getKeystoreFile();
-                    if (keystoreFile.exists() && !keystoreFile.delete()) {
-                        Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
-                    } else {
-                        Log.i(MODULE_NAME, "Deleted corrupt keystore - fresh cert will be generated");
-                    }
+                    // Keystore is corrupt - rename for recovery and return false
+                    Log.e(MODULE_NAME, "Software keystore corrupt in keyExists(): " + e.getMessage());
+                    handleCorruptKeystore("keyExists()");
                     promise.resolve(false);
                 }
             }
@@ -915,13 +948,10 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
                     return;
                 } catch (Exception e) {
-                    // Keystore is corrupt - delete and report key not found
-                    Log.w(MODULE_NAME, "Software keystore corrupt during getPublicKey: " + e.getMessage());
-                    File keystoreFile = getKeystoreFile();
-                    if (keystoreFile.exists() && !keystoreFile.delete()) {
-                        Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
-                    }
-                    promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found (keystore was corrupt)");
+                    // Keystore is corrupt - rename for potential recovery, then report key not found
+                    Log.e(MODULE_NAME, "Software keystore corrupt during getPublicKey: " + e.getMessage());
+                    handleCorruptKeystore("getPublicKey()");
+                    promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found (keystore was corrupt and renamed for recovery)");
                     return;
                 }
             }
@@ -957,6 +987,30 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
+    /**
+     * Handle corrupt keystore by renaming it for potential manual recovery.
+     * Returns true if file was renamed successfully, false otherwise.
+     */
+    private boolean handleCorruptKeystore(String context) {
+        File keystoreFile = getKeystoreFile();
+        if (!keystoreFile.exists()) {
+            return false;
+        }
+
+        File corruptedFile = new File(keystoreFile.getParent(),
+                                     SOFTWARE_KEYSTORE_FILE + ".corrupted." + System.currentTimeMillis());
+
+        if (keystoreFile.renameTo(corruptedFile)) {
+            Log.w(MODULE_NAME, "Keystore corrupted during " + context + ". " +
+                              "Renamed to: " + corruptedFile.getName() + " for potential manual recovery. " +
+                              "Fresh keystore will be created on next operation.");
+            return true;
+        } else {
+            Log.e(MODULE_NAME, "Failed to rename corrupt keystore file during " + context);
+            return false;
+        }
+    }
+
     // Helper method to delete hardware key if it exists
     private void deleteHardwareKeyIfExists(String privateKeyAlias) throws Exception {
         KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
@@ -982,12 +1036,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 // Keystore file doesn't exist, nothing to delete
                 return;
             } catch (Exception e) {
-                // Keystore is corrupt - delete and return
-                Log.w(MODULE_NAME, "Software keystore corrupt during stale key deletion: " + e.getMessage());
-                File keystoreFile = getKeystoreFile();
-                if (keystoreFile.exists() && !keystoreFile.delete()) {
-                    Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
-                }
+                // Keystore is corrupt - rename for potential recovery
+                Log.e(MODULE_NAME, "Software keystore corrupt during stale key deletion: " + e.getMessage());
+                handleCorruptKeystore("deleteSoftwareKeyIfExists()");
                 return;
             }
         }
