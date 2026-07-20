@@ -197,6 +197,12 @@ public class CSRModule extends ReactContextBaseJavaModule {
     /**
      * Save software keystore to file atomically.
      * Uses temp file + atomic rename to prevent corruption from crashes during write.
+     *
+     * CRITICAL: Atomic write prevents data loss during crashes/power failure.
+     * Without this, a crash between delete-old and write-new loses ALL stored keys.
+     * Pattern: write to .tmp → fsync → atomic rename → final file only updated if successful
+     *
+     * Addresses review concern: "Non-atomic rewrite can lose the entire keystore"
      */
     private void saveSoftwareKeyStore(KeyStore keyStore) throws Exception {
         File keystoreFile = getKeystoreFile();
@@ -215,6 +221,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
 
         // Use atomic move on API 26+ for better reliability
+        // Atomic operations ensure the final file is only created after successful write
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             try {
                 Files.move(tempFile.toPath(), keystoreFile.toPath(),
@@ -810,7 +817,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
         KeyPair keyPair = keyPairGenerator.generateKeyPair();
         Log.d(MODULE_NAME, "Software key pair generated successfully");
 
-        // Synchronize all software keystore file operations
+        // Thread-safe keystore file operations
+        // Prevents race conditions when multiple React Native threads call generateCSR simultaneously
+        // All read-modify-write operations on the PKCS12 file must be atomic to prevent corruption
         synchronized (SOFTWARE_KEYSTORE_LOCK) {
             storeSoftwareKey(privateKeyAlias, keyPair);
         }
