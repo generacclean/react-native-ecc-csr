@@ -83,6 +83,34 @@ public class CSRModule extends ReactContextBaseJavaModule {
     // Race condition protection for software keystore file access
     private static final Object SOFTWARE_KEYSTORE_LOCK = new Object();
 
+    // Cached master key to prevent "No matching key found" errors
+    // Issue: Creating new MasterKey instances can lead to key mismatches
+    // MUST be static to survive across CSRModule instance recreations (hot reload, bridge restarts)
+    // MUST be cleared when decryption fails (master key invalidated by OS/app reinstall)
+    private static volatile MasterKey cachedMasterKey = null;
+    private static final Object MASTER_KEY_LOCK = new Object();
+
+    /**
+     * Invalidate cached master key when decryption fails.
+     *
+     * This happens when:
+     * - App data is cleared
+     * - App is reinstalled
+     * - OS invalidates the master key (rare but possible)
+     * - Keystore file was encrypted with a different master key
+     *
+     * Clearing the cache allows getEncryptedKeystoreFile() to create a fresh master key
+     * on the next call, which can then decrypt/encrypt successfully.
+     */
+    private void invalidateCachedMasterKey() {
+        synchronized (MASTER_KEY_LOCK) {
+            if (cachedMasterKey != null) {
+                Log.i(MODULE_NAME, "Invalidating cached master key due to decryption failure");
+                cachedMasterKey = null;
+            }
+        }
+    }
+
     public CSRModule(ReactApplicationContext reactContext) {
         super(reactContext);
         ensureBouncyCastleProvider();
@@ -299,9 +327,15 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
     // Encryption at rest using AndroidX EncryptedFile
     private EncryptedFile getEncryptedKeystoreFile(Context context) throws Exception {
-        MasterKey masterKey = new MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build();
+        // Use cached master key to prevent "No matching key found" errors
+        synchronized (MASTER_KEY_LOCK) {
+            if (cachedMasterKey == null) {
+                Log.d(MODULE_NAME, "Creating new MasterKey instance (first use)");
+                cachedMasterKey = new MasterKey.Builder(context)
+                    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                    .build();
+            }
+        }
 
         File file = new File(context.getFilesDir(), SOFTWARE_KEYSTORE_FILE);
 
@@ -313,7 +347,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         return new EncryptedFile.Builder(
             context,
             file,
-            masterKey,
+            cachedMasterKey,
             EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB)
             .build();
     }
@@ -657,12 +691,28 @@ public class CSRModule extends ReactContextBaseJavaModule {
     }
 
     private void storeSoftwareKey(String privateKeyAlias, KeyPair keyPair) throws Exception {
-        // Use EncryptedFile for encryption at rest
-        EncryptedFile encFile = getEncryptedKeystoreFile(getReactApplicationContext());
+        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+        EncryptedFile encFile = null;
         KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
 
+        // Try to get EncryptedFile - may fail if master key/keyset is corrupt
+        try {
+            encFile = getEncryptedKeystoreFile(getReactApplicationContext());
+        } catch (Exception e) {
+            // Master key or Tink keyset is corrupt (AEADBadTagException)
+            Log.w(MODULE_NAME, "EncryptedFile creation failed, invalidating cache: " + e.getMessage());
+            invalidateCachedMasterKey();  // Clear stale master key cache AND delete Tink keyset
+
+            // Retry with fresh master key
+            try {
+                encFile = getEncryptedKeystoreFile(getReactApplicationContext());
+            } catch (Exception retryE) {
+                Log.e(MODULE_NAME, "EncryptedFile retry also failed: " + retryE.getMessage());
+                throw new Exception("Failed to create EncryptedFile after master key reset: " + retryE.getMessage(), retryE);
+            }
+        }
+
         // Try to load existing keystore, create new if doesn't exist or is corrupt
-        File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
         try (FileInputStream fis = encFile.openFileInput()) {
             softwareKeyStore.load(fis, "".toCharArray());
         } catch (FileNotFoundException e) {
@@ -698,14 +748,19 @@ public class CSRModule extends ReactContextBaseJavaModule {
             throw new IOException("Failed to delete existing temp keystore file");
         }
 
-        // Build EncryptedFile for temp path
-        MasterKey masterKey = new MasterKey.Builder(getReactApplicationContext())
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build();
+        // Build EncryptedFile for temp path using cached master key
+        synchronized (MASTER_KEY_LOCK) {
+            if (cachedMasterKey == null) {
+                Log.d(MODULE_NAME, "Creating new MasterKey instance for temp file (first use)");
+                cachedMasterKey = new MasterKey.Builder(getReactApplicationContext())
+                    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                    .build();
+            }
+        }
         EncryptedFile tempEncFile = new EncryptedFile.Builder(
             getReactApplicationContext(),
             tempKeystoreFile,
-            masterKey,
+            cachedMasterKey,
             EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB)
             .build();
 
@@ -782,6 +837,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     } catch (IOException | GeneralSecurityException e) {
                         // Keystore is corrupt/undecryptable - delete and start fresh
                         Log.w(MODULE_NAME, "Software keystore corrupt during delete, reinitializing: " + e.getMessage());
+                        invalidateCachedMasterKey();  // Clear stale master key cache
                         if (keystoreFile.exists() && !keystoreFile.delete()) {
                             Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
                         }
@@ -798,13 +854,19 @@ public class CSRModule extends ReactContextBaseJavaModule {
                             throw new IOException("Failed to delete existing temp keystore file");
                         }
 
-                        MasterKey masterKey = new MasterKey.Builder(getReactApplicationContext())
-                            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                            .build();
+                        // Use cached master key
+                        synchronized (MASTER_KEY_LOCK) {
+                            if (cachedMasterKey == null) {
+                                Log.d(MODULE_NAME, "Creating new MasterKey instance (hasSoftwareKey path)");
+                                cachedMasterKey = new MasterKey.Builder(getReactApplicationContext())
+                                    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                                    .build();
+                            }
+                        }
                         EncryptedFile tempEncFile = new EncryptedFile.Builder(
                             getReactApplicationContext(),
                             tempKeystoreFile,
-                            masterKey,
+                            cachedMasterKey,
                             EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB)
                             .build();
 
@@ -883,6 +945,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
             // Synchronize software keystore access
             synchronized (SOFTWARE_KEYSTORE_LOCK) {
+                File keystoreFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+
+                // First attempt
                 try {
                     EncryptedFile encFile = getEncryptedKeystoreFile(getReactApplicationContext());
                     KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
@@ -896,9 +961,42 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     promise.resolve(false);
                     return;
                 } catch (Exception e) {
-                    Log.w(MODULE_NAME, "Error checking software keystore: " + e.getMessage());
-                    promise.resolve(false);
-                    return;
+                    // Keystore is corrupt, undecryptable, or from incompatible version
+                    // (e.g., master key invalidated after app reinstall, OS upgrade, pre-encrypted file)
+                    Log.w(MODULE_NAME, "Software keystore corrupt/undecryptable in keyExists(), attempting recovery: " + e.getMessage());
+                    invalidateCachedMasterKey();  // Clear stale master key cache
+
+                    if (keystoreFile.exists()) {
+                        Log.w(MODULE_NAME, "Deleting corrupt keystore file: " + keystoreFile.getAbsolutePath());
+                        if (!keystoreFile.delete()) {
+                            Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
+                            promise.resolve(false);
+                            return;
+                        } else {
+                            Log.i(MODULE_NAME, "Corrupt keystore deleted successfully");
+                        }
+                    }
+
+                    // Retry with fresh master key
+                    try {
+                        // File was deleted, so this should return FileNotFoundException and resolve(false)
+                        EncryptedFile encFileRetry = getEncryptedKeystoreFile(getReactApplicationContext());
+                        KeyStore softwareKeyStoreRetry = KeyStore.getInstance("PKCS12");
+
+                        try (FileInputStream fisRetry = encFileRetry.openFileInput()) {
+                            softwareKeyStoreRetry.load(fisRetry, "".toCharArray());
+                            promise.resolve(softwareKeyStoreRetry.containsAlias(privateKeyAlias));
+                            return;
+                        }
+                    } catch (FileNotFoundException retryE) {
+                        Log.i(MODULE_NAME, "Retry confirmed file deleted - fresh certificate generation will be triggered");
+                        promise.resolve(false);
+                        return;
+                    } catch (Exception retryE) {
+                        Log.e(MODULE_NAME, "Retry also failed: " + retryE.getMessage());
+                        promise.resolve(false);
+                        return;
+                    }
                 }
             }
         } catch (Exception e) {
@@ -947,6 +1045,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 } catch (IOException | GeneralSecurityException e) {
                     // Keystore is corrupt/undecryptable - delete and report key not found
                     Log.w(MODULE_NAME, "Software keystore corrupt during getPublicKey, reinitializing: " + e.getMessage());
+                    invalidateCachedMasterKey();  // Clear stale master key cache
                     if (keystoreFile.exists() && !keystoreFile.delete()) {
                         Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
                     }
@@ -1026,6 +1125,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
             } catch (IOException | GeneralSecurityException e) {
                 // Keystore is corrupt - delete and return
                 Log.w(MODULE_NAME, "Software keystore corrupt during stale key deletion: " + e.getMessage());
+                invalidateCachedMasterKey();  // Clear stale master key cache
                 if (keystoreFile.exists() && !keystoreFile.delete()) {
                     Log.e(MODULE_NAME, "Failed to delete corrupt keystore file");
                 }
@@ -1042,13 +1142,19 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     throw new IOException("Failed to delete existing temp keystore file");
                 }
 
-                MasterKey masterKey = new MasterKey.Builder(getReactApplicationContext())
-                    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                    .build();
+                // Use cached master key
+                synchronized (MASTER_KEY_LOCK) {
+                    if (cachedMasterKey == null) {
+                        Log.d(MODULE_NAME, "Creating new MasterKey instance (getPublicKey path)");
+                        cachedMasterKey = new MasterKey.Builder(getReactApplicationContext())
+                            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                            .build();
+                    }
+                }
                 EncryptedFile tempEncFile = new EncryptedFile.Builder(
                     getReactApplicationContext(),
                     tempKeystoreFile,
-                    masterKey,
+                    cachedMasterKey,
                     EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB)
                     .build();
 
