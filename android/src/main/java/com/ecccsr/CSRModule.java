@@ -147,6 +147,11 @@ public class CSRModule extends ReactContextBaseJavaModule {
     /**
      * Load software keystore from file.
      * Uses empty password - security relies on OS-level app sandboxing.
+     *
+     * Automatically recovers from corrupted keystore files by:
+     * 1. Renaming the corrupt file with a timestamp
+     * 2. Initializing a fresh empty keystore
+     * This prevents permanent failure if the keystore becomes unreadable.
      */
     private KeyStore loadSoftwareKeyStore() throws Exception {
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
@@ -160,6 +165,31 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
         try (FileInputStream fis = new FileInputStream(keystoreFile)) {
             keyStore.load(fis, KEYSTORE_PASSWORD);
+            return keyStore;
+        } catch (IOException | java.security.GeneralSecurityException e) {
+            // Keystore file exists but can't be loaded (corrupted, wrong format, etc.)
+            // Move it aside and start fresh to prevent permanent failure
+            Log.e(MODULE_NAME, "Corrupt keystore detected, recovering by creating fresh keystore", e);
+
+            String timestamp = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                    .format(new java.util.Date());
+            File corruptedFile = new File(
+                keystoreFile.getParent(),
+                keystoreFile.getName() + ".corrupted." + timestamp
+            );
+
+            if (keystoreFile.renameTo(corruptedFile)) {
+                Log.w(MODULE_NAME, "Moved corrupt keystore to: " + corruptedFile.getName());
+            } else {
+                // If rename fails, delete the corrupt file as last resort
+                Log.w(MODULE_NAME, "Failed to rename corrupt keystore, deleting it");
+                if (!keystoreFile.delete()) {
+                    throw new IOException("Failed to delete corrupt keystore file", e);
+                }
+            }
+
+            // Initialize fresh empty keystore
+            keyStore.load(null, KEYSTORE_PASSWORD);
             return keyStore;
         }
     }
