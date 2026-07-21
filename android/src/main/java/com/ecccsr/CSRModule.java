@@ -686,6 +686,22 @@ public class CSRModule extends ReactContextBaseJavaModule {
             response.putBoolean("hardwareKeyRequested", requestedHardwareKey);
             response.putBoolean("tlsCompatible", canUseHardwareKeysForTLS());
 
+            // Add keystore descriptor for explicit contract with mqtt-mtls
+            com.facebook.react.bridge.WritableMap keystoreDescriptor = com.facebook.react.bridge.Arguments.createMap();
+            if (useHardwareKey) {
+                // Hardware keys are stored in Android Keystore, accessed by alias
+                keystoreDescriptor.putString("path", "");
+                keystoreDescriptor.putString("password", "");
+                keystoreDescriptor.putString("format", "hardware");
+            } else {
+                // Software keys are stored in PKCS12 file
+                File keystoreFile = getKeystoreFile();
+                keystoreDescriptor.putString("path", keystoreFile.getAbsolutePath());
+                keystoreDescriptor.putString("password", "");
+                keystoreDescriptor.putString("format", "pkcs12");
+            }
+            response.putMap("keystore", keystoreDescriptor);
+
             Log.d(MODULE_NAME, "CSR generated successfully (requested: " +
                   (requestedHardwareKey ? "hardware" : "software") +
                   ", actual: " + (useHardwareKey ? "hardware" : "software") + ")");
