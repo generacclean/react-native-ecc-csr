@@ -130,6 +130,7 @@ interface CSRResult {
   useHardwareKey: boolean;        // Final decision (software or hardware)
   hardwareKeyRequested: boolean;  // What the app requested
   tlsCompatible: boolean;         // Device supports hardware keys for TLS
+  keystore: KeystoreDescriptor;   // Explicit keystore location/format (Issue #21)
 }
 ```
 
