@@ -2,6 +2,8 @@
 
 A React Native module for generating Certificate Signing Requests (CSR) with Elliptic Curve Cryptography (ECC) support.
 
+> **ℹ️ This is the Field Pro variant.** Field Pro (installer-app) consumes this `@generacclean`-scoped module from GitHub Packages — make changes here. A separate [`neurio/react-native-ecc-csr`](https://github.com/neurio/react-native-ecc-csr) exists for **PWRview** (end-of-life, git-SSH) and is not used by Field Pro.
+
 ## ⚠️ IMPORTANT SECURITY NOTICE
 
 ### Software Keystore Security (useHardwareKey=false)
