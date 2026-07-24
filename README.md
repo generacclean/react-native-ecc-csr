@@ -77,6 +77,7 @@ console.log(result.privateKeyAlias); // String
 console.log(result.publicKey); // Base64-encoded public key
 console.log(result.isHardwareBacked); // Boolean
 console.log(result.tlsCompatible); // Boolean
+console.log(result.keystore); // KeystoreDescriptor - see "Keystore Contract" section
 ```
 
 ## Hardware vs Software Keystore
@@ -131,8 +132,75 @@ interface CSRResult {
   useHardwareKey: boolean;        // Final decision (software or hardware)
   hardwareKeyRequested: boolean;  // What the app requested
   tlsCompatible: boolean;         // Device supports hardware keys for TLS
+  keystore: KeystoreDescriptor;   // Explicit keystore location/format (Issue #21)
 }
 ```
+
+## Keystore Contract
+
+### Explicit Keystore Descriptor (Issue #21)
+
+The CSR result now includes a `keystore` descriptor that makes the implicit file-contract between `react-native-ecc-csr` and `react-native-mqtt-mtls` explicit.
+
+**Before (implicit contract):**
+- Both modules independently hard-coded `software_keys.p12` filename
+- Empty password assumption was hidden
+- Changes on either side broke silently at runtime
+
+**After (explicit contract):**
+- CSR result includes `keystore: KeystoreDescriptor`
+- App threads this descriptor to mTLS module
+- No hard-coded filenames or passwords
+
+```typescript
+interface KeystoreDescriptor {
+  path: string;      // Absolute path (pkcs12) or "" (hardware/keychain)
+  password: string;  // Keystore password (currently "" for all formats)
+  format: 'pkcs12' | 'hardware' | 'keychain';
+}
+```
+
+### Format Details
+
+| Format | Platform | Description | Path |
+|--------|----------|-------------|------|
+| `pkcs12` | Android (software) | PKCS12 file in app's private directory | `/data/data/com.app/files/software_keys.p12` |
+| `hardware` | Android (hardware) | Android Keystore, accessed by alias | `""` (no file) |
+| `keychain` | iOS | iOS Keychain, accessed by alias | `""` (no file) |
+
+### Usage with mqtt-mtls
+
+```typescript
+// Generate CSR
+const csrResult = await CSRModule.generateCSR({
+  commonName: "device-001",
+  privateKeyAlias: "my-key",
+  useHardwareKey: false
+});
+
+// Get signed certificate from CA...
+const signedCert = await fetchSignedCertFromCA(csrResult.csr);
+
+// Pass keystore descriptor to mqtt-mtls
+await mqttClient.connect({
+  broker: "ssl://broker.example.com:8883",
+  clientCert: signedCert,
+  privateKeyAlias: csrResult.privateKeyAlias,
+  // Explicit keystore params from CSR result
+  keystorePath: csrResult.keystore.path,
+  keystorePassword: csrResult.keystore.password,
+  keystoreFormat: csrResult.keystore.format
+});
+```
+
+### Benefits
+
+✅ **Compile-time safety:** TypeScript catches mismatches  
+✅ **Cross-package coordination:** No hidden assumptions  
+✅ **Future-proof:** Format changes are explicit, not silent  
+✅ **Testable:** Integration tests can validate the contract
+
+**See also:** [react-native-mqtt-mtls PR #4](https://github.com/generacclean/react-native-mqtt-mtls) for the reader-side implementation.
 
 ## API Reference
 

@@ -97,6 +97,14 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
         NSString *csrPEM = [self convertToPEM:csrData label:@"CERTIFICATE REQUEST"];
         NSString *publicKeyPEM = [self convertToPEM:publicKeyData label:@"PUBLIC KEY"];
         
+        // Add keystore descriptor for explicit contract with mqtt-mtls
+        // On iOS, keys are stored in Keychain (not a file), accessed by alias
+        NSDictionary *keystoreDescriptor = @{
+            @"path": @"",  // iOS uses Keychain, not file-based storage
+            @"password": @"",
+            @"format": @"keychain"
+        };
+
         resolve(@{
             @"csr": csrPEM,
             @"privateKeyAlias": privateKeyAlias,
@@ -104,7 +112,8 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
             @"isHardwareBacked": @(isHardwareBacked),
             @"useHardwareKey": @(actualUseHardwareKey),
             @"hardwareKeyRequested": @(useHardwareKey),
-            @"tlsCompatible": @YES  // iOS Secure Enclave always supports TLS
+            @"tlsCompatible": @YES,  // iOS Secure Enclave always supports TLS
+            @"keystore": keystoreDescriptor
         });
         
     } @catch (NSException *exception) {

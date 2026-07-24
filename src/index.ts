@@ -20,6 +20,30 @@ export interface CSRParams {
   useHardwareKey?: boolean;
 }
 
+/**
+ * Describes where and how the private key is stored.
+ * This makes the implicit keystore contract explicit between ecc-csr and mqtt-mtls.
+ *
+ * Formats:
+ * - 'pkcs12': Software keys in PKCS12 file (Android software keystore)
+ * - 'hardware': Hardware-backed keys in Android Keystore (accessed by alias, no file)
+ * - 'keychain': iOS Keychain storage (accessed by alias, no file)
+ */
+export interface KeystoreDescriptor {
+  /**
+   * Absolute file path to keystore (for 'pkcs12') or empty string (for 'hardware'/'keychain')
+   */
+  path: string;
+  /**
+   * Keystore password (empty string for all current implementations)
+   */
+  password: string;
+  /**
+   * Storage format/mechanism
+   */
+  format: 'pkcs12' | 'hardware' | 'keychain';
+}
+
 export interface CSRResult {
   csr: string;
   privateKeyAlias: string;
@@ -28,6 +52,7 @@ export interface CSRResult {
   useHardwareKey: boolean;
   hardwareKeyRequested: boolean;
   tlsCompatible: boolean;
+  keystore: KeystoreDescriptor;
 }
 
 export interface HardwareKeystoreCapabilities {

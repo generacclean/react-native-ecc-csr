@@ -213,10 +213,9 @@ public class CSRFormatTest {
     @Test
     public void testFilenameSanitization() {
         // Test that filenames are sanitized properly
-        String filename = "software_keys_v1.p12";
+        String filename = "software_keys.p12";
 
         assertTrue("Should have .p12 extension", filename.endsWith(".p12"));
-        assertTrue("Should contain version", filename.contains("_v1"));
         assertFalse("Should not contain path separators", filename.contains("/"));
         assertFalse("Should not contain path separators", filename.contains("\\"));
     }
