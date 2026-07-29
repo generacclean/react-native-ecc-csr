@@ -135,7 +135,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * Get File object for software keystore (plain file, no encryption).
      * Replaces EncryptedFile approach which had Tink keyset synchronization issues.
      */
-    private File getKeystoreFile() {
+    File getKeystoreFile() {
         File file = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
         // Set secure permissions if file exists
         if (file.exists()) {
@@ -422,7 +422,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * address string. This prevents hostname injection into SAN iPAddress extensions,
      * which would produce malformed certificates.
      */
-    private boolean isValidIPAddress(String ip) {
+    boolean isValidIPAddress(String ip) {
         if (ip == null || ip.trim().isEmpty()) {
             return false;
         }
@@ -508,7 +508,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
     }
 
     // Sanitize DN values (already handled by X500NameBuilder, but add explicit method)
-    private String sanitizeDNValue(String value) {
+    String sanitizeDNValue(String value) {
         if (value == null) {
             return "";
         }
@@ -516,8 +516,77 @@ public class CSRModule extends ReactContextBaseJavaModule {
         return value.trim();
     }
 
+    /** Thrown for validation failures that should be surfaced to JS as a specific error code. */
+    static class CSRRejectedException extends Exception {
+        final String code;
+
+        CSRRejectedException(String code, String message) {
+            super(message);
+            this.code = code;
+        }
+    }
+
+    /** Plain-Java result of a CSR generation, decoupled from the RN bridge's WritableMap. */
+    static class CSRGenerationResult {
+        final String csr;
+        final String privateKeyAlias;
+        final String publicKeyBase64;
+        final boolean isHardwareBacked;
+        final boolean useHardwareKey;
+        final boolean hardwareKeyRequested;
+        final boolean tlsCompatible;
+        final String keystorePath; // null when useHardwareKey is true
+
+        CSRGenerationResult(String csr, String privateKeyAlias, String publicKeyBase64,
+                             boolean isHardwareBacked, boolean useHardwareKey,
+                             boolean hardwareKeyRequested, boolean tlsCompatible, String keystorePath) {
+            this.csr = csr;
+            this.privateKeyAlias = privateKeyAlias;
+            this.publicKeyBase64 = publicKeyBase64;
+            this.isHardwareBacked = isHardwareBacked;
+            this.useHardwareKey = useHardwareKey;
+            this.hardwareKeyRequested = hardwareKeyRequested;
+            this.tlsCompatible = tlsCompatible;
+            this.keystorePath = keystorePath;
+        }
+    }
+
     @ReactMethod
     public void generateCSR(ReadableMap params, Promise promise) {
+        try {
+            CSRGenerationResult result = generateCSRInternal(params);
+
+            com.facebook.react.bridge.WritableMap response = com.facebook.react.bridge.Arguments.createMap();
+            response.putString("csr", result.csr);
+            response.putString("privateKeyAlias", result.privateKeyAlias);
+            response.putString("publicKey", result.publicKeyBase64);
+            response.putBoolean("isHardwareBacked", result.isHardwareBacked);
+            response.putBoolean("useHardwareKey", result.useHardwareKey);
+            response.putBoolean("hardwareKeyRequested", result.hardwareKeyRequested);
+            response.putBoolean("tlsCompatible", result.tlsCompatible);
+
+            if (result.keystorePath != null) {
+                com.facebook.react.bridge.WritableMap keystoreDescriptor = com.facebook.react.bridge.Arguments.createMap();
+                keystoreDescriptor.putString("path", result.keystorePath);
+                keystoreDescriptor.putString("password", new String(KEYSTORE_PASSWORD));
+                keystoreDescriptor.putString("format", "pkcs12");
+                response.putMap("keystore", keystoreDescriptor);
+            }
+
+            promise.resolve(response);
+        } catch (CSRRejectedException e) {
+            promise.reject(e.code, e.getMessage());
+        } catch (Exception e) {
+            Log.e(MODULE_NAME, e.getMessage(), e);
+            promise.reject("CSR_GENERATION_ERROR", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Core CSR generation logic, decoupled from the RN bridge so it can be unit tested
+     * without a native module runtime (Arguments.createMap() requires a loaded JNI library).
+     */
+    CSRGenerationResult generateCSRInternal(ReadableMap params) throws Exception {
         KeyPair keyPair = null;
         PKCS10CertificationRequest csr = null;
         String currentStep = "initialization";
@@ -540,20 +609,17 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
             // Validate required parameters
             if (privateKeyAlias == null || privateKeyAlias.trim().isEmpty()) {
-                promise.reject("MISSING_ALIAS", "privateKeyAlias is required");
-                return;
+                throw new CSRRejectedException("MISSING_ALIAS", "privateKeyAlias is required");
             }
             privateKeyAlias = privateKeyAlias.trim();
 
             if (!curve.equals("secp256r1") && !curve.equals("secp384r1") && !curve.equals("secp521r1")) {
-                promise.reject("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1");
-                return;
+                throw new CSRRejectedException("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1");
             }
 
             // Validate IP address
             if (ipAddress != null && !ipAddress.trim().isEmpty() && !isValidIPAddress(ipAddress)) {
-                promise.reject("INVALID_IP", "Invalid IP address format: " + ipAddress);
-                return;
+                throw new CSRRejectedException("INVALID_IP", "Invalid IP address format: " + ipAddress);
             }
 
             // Keys are always allowed to be overwritten for simplicity.
@@ -677,20 +743,24 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 pemWriter.writeObject(csr);
             }
 
-            com.facebook.react.bridge.WritableMap response = com.facebook.react.bridge.Arguments.createMap();
-            response.putString("csr", csrWriter.toString());
-            response.putString("privateKeyAlias", privateKeyAlias);
-            response.putString("publicKey", Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP));
-            response.putBoolean("isHardwareBacked", useHardwareKey && isHardwareBacked(privateKeyAlias));
-            response.putBoolean("useHardwareKey", useHardwareKey);
-            response.putBoolean("hardwareKeyRequested", requestedHardwareKey);
-            response.putBoolean("tlsCompatible", canUseHardwareKeysForTLS());
+            String keystorePath = useHardwareKey ? null : getKeystoreFile().getAbsolutePath();
 
             Log.d(MODULE_NAME, "CSR generated successfully (requested: " +
                   (requestedHardwareKey ? "hardware" : "software") +
                   ", actual: " + (useHardwareKey ? "hardware" : "software") + ")");
-            promise.resolve(response);
 
+            return new CSRGenerationResult(
+                    csrWriter.toString(),
+                    privateKeyAlias,
+                    Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP),
+                    useHardwareKey && isHardwareBacked(privateKeyAlias),
+                    useHardwareKey,
+                    requestedHardwareKey,
+                    canUseHardwareKeysForTLS(),
+                    keystorePath);
+
+        } catch (CSRRejectedException e) {
+            throw e;
         } catch (Exception e) {
             // Provide better error context
             String errorContext = "CSR generation failed at step: " + currentStep;
@@ -699,9 +769,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
             } else if (csr == null) {
                 errorContext += " (CSR signing failed)";
             }
-
-            Log.e(MODULE_NAME, errorContext, e);
-            promise.reject("CSR_GENERATION_ERROR", errorContext + ": " + e.getMessage(), e);
+            throw new Exception(errorContext + ": " + e.getMessage(), e);
         }
     }
 
@@ -889,30 +957,63 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
+    /** Plain-Java result of a capability check, decoupled from the RN bridge's WritableMap. */
+    static class HardwareCapabilities {
+        final boolean tlsCompatible;
+        final int androidSdkVersion;
+        final boolean hasStrongBox;
+        final String manufacturer;
+        final String model;
+        final String device;
+
+        HardwareCapabilities(boolean tlsCompatible, int androidSdkVersion, boolean hasStrongBox,
+                              String manufacturer, String model, String device) {
+            this.tlsCompatible = tlsCompatible;
+            this.androidSdkVersion = androidSdkVersion;
+            this.hasStrongBox = hasStrongBox;
+            this.manufacturer = manufacturer;
+            this.model = model;
+            this.device = device;
+        }
+    }
+
     @ReactMethod
     public void getHardwareKeystoreCapabilities(Promise promise) {
         try {
+            HardwareCapabilities result = getHardwareKeystoreCapabilitiesInternal();
+
             com.facebook.react.bridge.WritableMap capabilities = com.facebook.react.bridge.Arguments.createMap();
-
-            boolean tlsCompatible = canUseHardwareKeysForTLS();
-            capabilities.putBoolean("tlsCompatible", tlsCompatible);
-            capabilities.putInt("androidSdkVersion", android.os.Build.VERSION.SDK_INT);
-
-            boolean hasStrongBox = false;
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                hasStrongBox = getReactApplicationContext().getPackageManager()
-                        .hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE);
-            }
-            capabilities.putBoolean("hasStrongBox", hasStrongBox);
-
-            capabilities.putString("manufacturer", android.os.Build.MANUFACTURER);
-            capabilities.putString("model", android.os.Build.MODEL);
-            capabilities.putString("device", android.os.Build.DEVICE);
+            capabilities.putBoolean("tlsCompatible", result.tlsCompatible);
+            capabilities.putInt("androidSdkVersion", result.androidSdkVersion);
+            capabilities.putBoolean("hasStrongBox", result.hasStrongBox);
+            capabilities.putString("manufacturer", result.manufacturer);
+            capabilities.putString("model", result.model);
+            capabilities.putString("device", result.device);
 
             promise.resolve(capabilities);
         } catch (Exception e) {
             promise.reject("CAPABILITY_CHECK_ERROR", "Failed to check capabilities: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Core capability-check logic, decoupled from the RN bridge so it can be unit tested
+     * without a native module runtime (Arguments.createMap() requires a loaded JNI library).
+     */
+    HardwareCapabilities getHardwareKeystoreCapabilitiesInternal() {
+        boolean hasStrongBox = false;
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            hasStrongBox = getReactApplicationContext().getPackageManager()
+                    .hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE);
+        }
+
+        return new HardwareCapabilities(
+                canUseHardwareKeysForTLS(),
+                android.os.Build.VERSION.SDK_INT,
+                hasStrongBox,
+                android.os.Build.MANUFACTURER,
+                android.os.Build.MODEL,
+                android.os.Build.DEVICE);
     }
 
     @ReactMethod

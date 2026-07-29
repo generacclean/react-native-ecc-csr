@@ -21,7 +21,6 @@
     <cloud-backup>
         <!-- Exclude software keystore files from cloud backups -->
         <exclude domain="file" path="software_keys.p12"/>
-        <exclude domain="file" path="software_keys_v1.p12"/>
 
         <!-- Exclude any potential backup/temp files -->
         <exclude domain="file" path="software_keys.p12.bak"/>
@@ -34,7 +33,6 @@
     <device-transfer>
         <!-- Exclude software keystore files from device transfers -->
         <exclude domain="file" path="software_keys.p12"/>
-        <exclude domain="file" path="software_keys_v1.p12"/>
 
         <!-- Exclude any potential backup/temp files -->
         <exclude domain="file" path="software_keys.p12.bak"/>

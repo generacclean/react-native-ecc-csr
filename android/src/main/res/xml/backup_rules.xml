@@ -22,7 +22,6 @@
 <full-backup-content>
     <!-- Exclude software keystore file from all backups -->
     <exclude domain="file" path="software_keys.p12"/>
-    <exclude domain="file" path="software_keys_v1.p12"/>
 
     <!-- Exclude any potential backup/temp files -->
     <exclude domain="file" path="software_keys.p12.bak"/>

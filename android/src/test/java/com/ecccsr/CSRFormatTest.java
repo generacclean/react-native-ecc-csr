@@ -183,7 +183,9 @@ public class CSRFormatTest {
             int expectedSize = Integer.parseInt(curveSize[1]);
 
             // Extract size from curve name (e.g., "secp256r1" -> 256)
-            String sizeStr = curveName.replaceAll("[^0-9]", "");
+            // Strip the "secp" prefix and "r1" suffix rather than all non-digits,
+            // since "r1" itself contains a digit that would corrupt the result.
+            String sizeStr = curveName.substring(4, curveName.length() - 2);
             int actualSize = Integer.parseInt(sizeStr);
 
             assertEquals("Key size for " + curveName + " should be " + expectedSize,
@@ -213,10 +215,9 @@ public class CSRFormatTest {
     @Test
     public void testFilenameSanitization() {
         // Test that filenames are sanitized properly
-        String filename = "software_keys_v1.p12";
+        String filename = "software_keys.p12";
 
         assertTrue("Should have .p12 extension", filename.endsWith(".p12"));
-        assertTrue("Should contain version", filename.contains("_v1"));
         assertFalse("Should not contain path separators", filename.contains("/"));
         assertFalse("Should not contain path separators", filename.contains("\\"));
     }

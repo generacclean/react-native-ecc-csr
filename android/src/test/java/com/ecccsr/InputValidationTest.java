@@ -1,53 +1,32 @@
 package com.ecccsr;
 
+import com.ecccsr.testutil.FakeReactApplicationContext;
+
+import org.junit.Before;
 import org.junit.Test;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 
 import static org.junit.Assert.*;
 
 /**
- * Unit tests for input validation
+ * Unit tests for input validation. Delegates to the real CSRModule.isValidIPAddress /
+ * sanitizeDNValue rather than re-declaring the logic, so these tests fail if production
+ * behavior changes.
  */
+@RunWith(RobolectricTestRunner.class)
 public class InputValidationTest {
 
+    private CSRModule module;
+
+    @Before
+    public void setUp() {
+        module = new CSRModule(new FakeReactApplicationContext(RuntimeEnvironment.getApplication()));
+    }
+
     private boolean isValidIPAddress(String ip) {
-        if (ip == null || ip.trim().isEmpty()) {
-            return false;
-        }
-        try {
-            String trimmed = ip.trim();
-            InetAddress addr = InetAddress.getByName(trimmed);
-
-            // Verify input is a literal IP address, not a hostname that resolved
-            // For IPv6: normalize both sides by parsing and re-stringifying
-            // This handles compressed forms (2001:db8::1) vs uncompressed (2001:db8:0:0:0:0:0:1)
-            String resolvedAddr = addr.getHostAddress();
-            String inputForComparison = trimmed.replace("[", "").replace("]", "");
-
-            // Try direct comparison first (handles IPv4 and exact IPv6 matches)
-            if (resolvedAddr.equals(inputForComparison)) {
-                return true;
-            }
-
-            // For IPv6 compressed addresses, normalize both sides by re-parsing
-            // Only do this for inputs that look like IPv6 (contain ':')
-            // to avoid accepting hostnames that resolve to the same IP
-            if (inputForComparison.contains(":")) {
-                // If input is a valid IPv6 literal, parsing it should yield the same InetAddress
-                try {
-                    InetAddress inputAddr = InetAddress.getByName(inputForComparison);
-                    return inputAddr.equals(addr);
-                } catch (UnknownHostException e) {
-                    // Input couldn't be re-parsed, likely invalid
-                    return false;
-                }
-            }
-
-            return false;
-        } catch (UnknownHostException e) {
-            return false;
-        }
+        return module.isValidIPAddress(ip);
     }
 
     @Test
@@ -159,17 +138,10 @@ public class InputValidationTest {
 
     @Test
     public void testDNValueSanitization() {
-        // Test DN value sanitization
-        assertEquals("Should trim whitespace", "Test", sanitizeDNValue("  Test  "));
-        assertEquals("Should handle null", "", sanitizeDNValue(null));
-        assertEquals("Should handle empty", "", sanitizeDNValue(""));
-        assertEquals("Should preserve special chars", "Test,Inc.", sanitizeDNValue("Test,Inc."));
-    }
-
-    private String sanitizeDNValue(String value) {
-        if (value == null) {
-            return "";
-        }
-        return value.trim();
+        // Test DN value sanitization against the real production method
+        assertEquals("Should trim whitespace", "Test", module.sanitizeDNValue("  Test  "));
+        assertEquals("Should handle null", "", module.sanitizeDNValue(null));
+        assertEquals("Should handle empty", "", module.sanitizeDNValue(""));
+        assertEquals("Should preserve special chars", "Test,Inc.", module.sanitizeDNValue("Test,Inc."));
     }
 }

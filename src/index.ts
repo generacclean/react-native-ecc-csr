@@ -20,6 +20,12 @@ export interface CSRParams {
   useHardwareKey?: boolean;
 }
 
+export interface CSRKeystoreDescriptor {
+  path: string;
+  password: string;
+  format: 'pkcs12';
+}
+
 export interface CSRResult {
   csr: string;
   privateKeyAlias: string;
@@ -28,6 +34,11 @@ export interface CSRResult {
   useHardwareKey: boolean;
   hardwareKeyRequested: boolean;
   tlsCompatible: boolean;
+  /**
+   * Present only when the key was stored in the software keystore (useHardwareKey === false).
+   * Hardware-backed keys live in the Android Keystore and have no keystore file to describe.
+   */
+  keystore?: CSRKeystoreDescriptor;
 }
 
 export interface HardwareKeystoreCapabilities {
