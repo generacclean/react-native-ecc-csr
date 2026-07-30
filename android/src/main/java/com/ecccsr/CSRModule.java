@@ -63,6 +63,15 @@ public class CSRModule extends ReactContextBaseJavaModule {
     private static final String SOFTWARE_KEYSTORE_FILE = "software_keys.p12";
 
     /**
+     * Subdirectory for quarantined corrupt keystore files. Android's backup exclusion API
+     * (both backup_rules.xml and data_extraction_rules.xml) only supports exact file/directory
+     * matches, not glob patterns, so a timestamped ".corrupted.<timestamp>" filename can't be
+     * excluded directly. Quarantining into a fixed-name subdirectory lets one exclusion entry
+     * cover all quarantined files regardless of timestamp.
+     */
+    private static final String CORRUPTED_KEYSTORE_DIR = "keystore_forensics";
+
+    /**
      * PKCS12 keystore password - intentionally empty for app-private storage.
      *
      * SECURITY RATIONALE (for code reviewers):
@@ -171,10 +180,20 @@ public class CSRModule extends ReactContextBaseJavaModule {
             // Move it aside and start fresh to prevent permanent failure
             Log.e(MODULE_NAME, "Corrupt keystore detected, recovering by creating fresh keystore", e);
 
+            File forensicsDir = new File(keystoreFile.getParentFile(), CORRUPTED_KEYSTORE_DIR);
+            if (!forensicsDir.exists() && !forensicsDir.mkdirs()) {
+                Log.w(MODULE_NAME, "Failed to create forensics directory, deleting corrupt keystore instead");
+                if (!keystoreFile.delete()) {
+                    throw new IOException("Failed to delete corrupt keystore file", e);
+                }
+                keyStore.load(null, KEYSTORE_PASSWORD);
+                return keyStore;
+            }
+
             String timestamp = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
                     .format(new java.util.Date());
             File corruptedFile = new File(
-                keystoreFile.getParent(),
+                forensicsDir,
                 keystoreFile.getName() + ".corrupted." + timestamp
             );
 
@@ -182,7 +201,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 Log.w(MODULE_NAME, "Moved corrupt keystore to: " + corruptedFile.getName());
 
                 // Clean up old .corrupted files (keep only the most recent 3)
-                cleanupCorruptedFiles(keystoreFile.getParentFile(), keystoreFile.getName());
+                cleanupCorruptedFiles(forensicsDir, keystoreFile.getName());
             } else {
                 // If rename fails, delete the corrupt file as last resort
                 Log.w(MODULE_NAME, "Failed to rename corrupt keystore, deleting it");
@@ -568,6 +587,10 @@ public class CSRModule extends ReactContextBaseJavaModule {
             if (result.keystorePath != null) {
                 com.facebook.react.bridge.WritableMap keystoreDescriptor = com.facebook.react.bridge.Arguments.createMap();
                 keystoreDescriptor.putString("path", result.keystorePath);
+                // KEYSTORE_PASSWORD is always empty (see its declaration for the security
+                // rationale) and is expected to remain so. If this ever becomes non-empty,
+                // it would cross the RN bridge as a plain string, visible to bridge/crash
+                // logs - do not add a real secret here without revisiting that exposure.
                 keystoreDescriptor.putString("password", new String(KEYSTORE_PASSWORD));
                 keystoreDescriptor.putString("format", "pkcs12");
                 response.putMap("keystore", keystoreDescriptor);
@@ -743,6 +766,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 pemWriter.writeObject(csr);
             }
 
+            // Safe to read the path here: generateSoftwareKeyPair() above already wrote and
+            // fsync'd the keystore file synchronously (via storeSoftwareKey/saveSoftwareKeyStore)
+            // before returning, so the write is confirmed complete by this point.
             String keystorePath = useHardwareKey ? null : getKeystoreFile().getAbsolutePath();
 
             Log.d(MODULE_NAME, "CSR generated successfully (requested: " +
@@ -1154,7 +1180,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * Clean up old .corrupted files to prevent unbounded accumulation.
      * Keeps only the most recent 3 corrupted files for forensics.
      *
-     * @param directory The directory containing the files
+     * @param directory The keystore_forensics directory containing the quarantined files
      * @param baseFileName The base filename (e.g., "software_keys.p12")
      */
     private void cleanupCorruptedFiles(File directory, String baseFileName) {

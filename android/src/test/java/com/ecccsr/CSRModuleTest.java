@@ -208,8 +208,10 @@ public class CSRModuleTest {
         CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("post-corruption-alias", "secp256r1"));
         assertNotNull(result.csr);
 
-        File parent = keystoreFile.getParentFile();
-        File[] corrupted = parent.listFiles((dir, name) -> name.startsWith(keystoreFile.getName() + ".corrupted."));
+        // Quarantined files live in a keystore_forensics/ subdirectory (not alongside the live
+        // keystore file) so a single backup-exclusion entry can cover all timestamped filenames.
+        File forensicsDir = new File(keystoreFile.getParentFile(), "keystore_forensics");
+        File[] corrupted = forensicsDir.listFiles((dir, name) -> name.startsWith(keystoreFile.getName() + ".corrupted."));
         assertNotNull(corrupted);
         assertTrue("corrupt file should have been quarantined with a .corrupted. suffix", corrupted.length >= 1);
     }
@@ -218,7 +220,7 @@ public class CSRModuleTest {
     public void corruptedFileRetention_cappedAtThreeMostRecent() throws Exception {
         module.generateCSRInternal(paramsFor("retention-seed-alias", "secp256r1"));
         File keystoreFile = module.getKeystoreFile();
-        File parent = keystoreFile.getParentFile();
+        File forensicsDir = new File(keystoreFile.getParentFile(), "keystore_forensics");
 
         // Simulate 5 prior corruption cycles by corrupting + regenerating 5 times.
         for (int i = 0; i < 5; i++) {
@@ -228,7 +230,7 @@ public class CSRModuleTest {
             module.generateCSRInternal(paramsFor("retention-alias-" + i, "secp256r1"));
         }
 
-        File[] corrupted = parent.listFiles((dir, name) -> name.startsWith(keystoreFile.getName() + ".corrupted."));
+        File[] corrupted = forensicsDir.listFiles((dir, name) -> name.startsWith(keystoreFile.getName() + ".corrupted."));
         assertNotNull(corrupted);
         assertTrue("at most 3 .corrupted files should be retained, found " + corrupted.length,
                 corrupted.length <= 3);

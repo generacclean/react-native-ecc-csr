@@ -26,4 +26,12 @@
     <!-- Exclude any potential backup/temp files -->
     <exclude domain="file" path="software_keys.p12.bak"/>
     <exclude domain="file" path="software_keys.p12.tmp"/>
+
+    <!--
+      Exclude quarantined corrupt keystore files. Corrupt keystores are moved into this
+      directory with a timestamped filename (software_keys.p12.corrupted.<timestamp>), and
+      backup exclusion rules don't support glob patterns, so a directory-level exclusion is
+      used to cover all quarantined files regardless of timestamp.
+    -->
+    <exclude domain="file" path="keystore_forensics"/>
 </full-backup-content>

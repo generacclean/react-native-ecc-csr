@@ -25,6 +25,9 @@
         <!-- Exclude any potential backup/temp files -->
         <exclude domain="file" path="software_keys.p12.bak"/>
         <exclude domain="file" path="software_keys.p12.tmp"/>
+
+        <!-- Exclude quarantined corrupt keystore files (see backup_rules.xml for rationale) -->
+        <exclude domain="file" path="keystore_forensics"/>
     </cloud-backup>
 
     <!--
@@ -37,5 +40,8 @@
         <!-- Exclude any potential backup/temp files -->
         <exclude domain="file" path="software_keys.p12.bak"/>
         <exclude domain="file" path="software_keys.p12.tmp"/>
+
+        <!-- Exclude quarantined corrupt keystore files (see backup_rules.xml for rationale) -->
+        <exclude domain="file" path="keystore_forensics"/>
     </device-transfer>
 </data-extraction-rules>
