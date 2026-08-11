@@ -3,6 +3,8 @@ package com.ecccsr;
 import com.ecccsr.testutil.FakeReactApplicationContext;
 import com.ecccsr.testutil.RecordingPromise;
 import com.facebook.react.bridge.JavaOnlyMap;
+import com.facebook.react.bridge.ReadableMap;
+import com.facebook.react.bridge.WritableMap;
 
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequest;
@@ -232,8 +234,8 @@ public class CSRModuleTest {
 
         File[] corrupted = forensicsDir.listFiles((dir, name) -> name.startsWith(keystoreFile.getName() + ".corrupted."));
         assertNotNull(corrupted);
-        assertTrue("at most 3 .corrupted files should be retained, found " + corrupted.length,
-                corrupted.length <= 3);
+        assertEquals("exactly 3 .corrupted files should be retained after 5 corruption cycles",
+                3, corrupted.length);
     }
 
     // ---- Input validation: exercise the real production isValidIPAddress ----
@@ -306,6 +308,36 @@ public class CSRModuleTest {
         assertEquals("INVALID_CURVE", promise.rejectedCode);
     }
 
+    @Test
+    public void generateCSR_bridgeResult_includesKeystoreMapForSoftwareKey() {
+        // Arguments.createMap() needs the native RN JNI library, which isn't available in
+        // this JVM-only Robolectric environment (see generateCSRInternal's Javadoc for why
+        // the bridge wrapper is split from the core logic in the first place). Mock the static
+        // factory so this test can still assert on the actual WritableMap the bridge builds,
+        // not just the plain-Java CSRGenerationResult the other tests exercise.
+        try (org.mockito.MockedStatic<com.facebook.react.bridge.Arguments> arguments =
+                org.mockito.Mockito.mockStatic(com.facebook.react.bridge.Arguments.class)) {
+            arguments.when(com.facebook.react.bridge.Arguments::createMap)
+                    .thenAnswer(invocation -> new JavaOnlyMap());
+
+            JavaOnlyMap params = paramsFor("bridge-descriptor-alias", "secp256r1");
+
+            RecordingPromise promise = new RecordingPromise();
+            module.generateCSR(params, promise);
+
+            assertTrue(promise.resolved);
+            WritableMap response = promise.resolvedMap();
+            assertTrue("bridge response must include a keystore map for a software-backed key",
+                    response.hasKey("keystore"));
+
+            ReadableMap keystore = response.getMap("keystore");
+            assertNotNull(keystore);
+            assertTrue(keystore.getString("path").endsWith("software_keys.p12"));
+            assertEquals("", keystore.getString("password"));
+            assertEquals("pkcs12", keystore.getString("format"));
+        }
+    }
+
     // ---- getHardwareKeystoreCapabilities / TLS-compatibility detection ----
 
     @Test
@@ -339,8 +371,10 @@ public class CSRModuleTest {
 
     @Test
     public void generateCSR_hardwareRequestedButUnsupported_fallsBackToSoftware() throws Exception {
-        // Robolectric's default SDK (16) has no AndroidKeystore EC/StrongBox support, so
-        // canUseHardwareKeysForTLS() is false and the module must fall back to software.
+        // Set SDK explicitly rather than relying on Robolectric's ambient default (which is
+        // derived from build.gradle's targetSdk/compileSdk 36, not a low fallback value) -
+        // canUseHardwareKeysForTLS() requires API 31+, so API 30 forces software fallback.
+        ReflectionHelpers.setStaticField(android.os.Build.VERSION.class, "SDK_INT", 30);
         JavaOnlyMap params = paramsFor("hw-fallback-alias", "secp256r1");
         params.putBoolean("useHardwareKey", true);
 

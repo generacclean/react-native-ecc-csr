@@ -32,6 +32,7 @@ android {
     }
 
     buildFeatures {
+        // Required because CSRModule.java reads BuildConfig.DEBUG to gate verbose logging.
         buildConfig true
     }
 }
@@ -47,6 +48,10 @@ dependencies {
     // Pinned to a Maven Central coordinate (published since RN 0.71) rather than the
     // "com.facebook.react:react-native:+" autolinking wildcard, which only resolves
     // inside a consuming app's local Maven repo and breaks standalone Gradle builds.
+    // This module compiles against exactly this version regardless of the consuming
+    // app's actual RN version - bump deliberately if the bridge API this module uses
+    // (Promise, ReactApplicationContext, ReadableMap, WritableMap) ever changes shape,
+    // e.g. as part of the Turbo Modules migration (IA-5752).
     compileOnly 'com.facebook.react:react-android:0.76.0'
     implementation 'org.bouncycastle:bcprov-jdk18on:1.76'
     implementation 'org.bouncycastle:bcpkix-jdk18on:1.76'

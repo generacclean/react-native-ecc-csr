@@ -143,6 +143,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
     /**
      * Get File object for software keystore (plain file, no encryption).
      * Replaces EncryptedFile approach which had Tink keyset synchronization issues.
+     *
+     * Side effect: re-applies 0600 permissions to the file if it already exists. This is
+     * idempotent and cheap, so callers don't need to treat this as a pure path lookup.
      */
     File getKeystoreFile() {
         File file = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
@@ -181,7 +184,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
             Log.e(MODULE_NAME, "Corrupt keystore detected, recovering by creating fresh keystore", e);
 
             File forensicsDir = new File(keystoreFile.getParentFile(), CORRUPTED_KEYSTORE_DIR);
-            if (!forensicsDir.exists() && !forensicsDir.mkdirs()) {
+            if (!forensicsDir.isDirectory() && !forensicsDir.mkdirs()) {
                 Log.w(MODULE_NAME, "Failed to create forensics directory, deleting corrupt keystore instead");
                 if (!keystoreFile.delete()) {
                     throw new IOException("Failed to delete corrupt keystore file", e);
@@ -190,7 +193,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 return keyStore;
             }
 
-            String timestamp = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+            String timestamp = new java.text.SimpleDateFormat("yyyyMMdd_HHmmssSSS", java.util.Locale.US)
                     .format(new java.util.Date());
             File corruptedFile = new File(
                 forensicsDir,
@@ -225,6 +228,10 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * Pattern: write to .tmp → fsync → atomic rename → final file only updated if successful
      *
      * Addresses review concern: "Non-atomic rewrite can lose the entire keystore"
+     *
+     * Guarantee: by the time this method returns normally, the keystore file at
+     * getKeystoreFile()'s path is fully written and in place - callers may read its path
+     * immediately afterward without needing to wait for any further completion signal.
      */
     private void saveSoftwareKeyStore(KeyStore keyStore) throws Exception {
         File keystoreFile = getKeystoreFile();
@@ -766,9 +773,6 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 pemWriter.writeObject(csr);
             }
 
-            // Safe to read the path here: generateSoftwareKeyPair() above already wrote and
-            // fsync'd the keystore file synchronously (via storeSoftwareKey/saveSoftwareKeyStore)
-            // before returning, so the write is confirmed complete by this point.
             String keystorePath = useHardwareKey ? null : getKeystoreFile().getAbsolutePath();
 
             Log.d(MODULE_NAME, "CSR generated successfully (requested: " +

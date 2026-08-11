@@ -178,22 +178,21 @@ public class CSRFormatTest {
             {"secp521r1", "521"}
         };
 
+        java.util.regex.Pattern curvePattern = java.util.regex.Pattern.compile("^secp(\\d+)r1$");
+
         for (String[] curveSize : curveSizes) {
             String curveName = curveSize[0];
             int expectedSize = Integer.parseInt(curveSize[1]);
 
-            // Extract size from curve name (e.g., "secp256r1" -> 256)
-            // Strip the "secp" prefix and "r1" suffix rather than all non-digits,
-            // since "r1" itself contains a digit that would corrupt the result.
-            String sizeStr = curveName.substring(4, curveName.length() - 2);
-            int actualSize = Integer.parseInt(sizeStr);
+            // Extract size from curve name (e.g., "secp256r1" -> 256) via a named-group
+            // regex rather than fixed offsets, so an unexpected curve name shape fails
+            // loudly instead of silently producing a wrong size.
+            java.util.regex.Matcher matcher = curvePattern.matcher(curveName);
+            assertTrue("Unexpected curve name format: " + curveName, matcher.matches());
+            int actualSize = Integer.parseInt(matcher.group(1));
 
             assertEquals("Key size for " + curveName + " should be " + expectedSize,
                 expectedSize, actualSize);
-
-            // Verify curve name format
-            assertTrue("Curve should start with 'secp'", curveName.startsWith("secp"));
-            assertTrue("Curve should end with 'r1'", curveName.endsWith("r1"));
         }
     }
 

@@ -35,8 +35,10 @@ export interface CSRResult {
   hardwareKeyRequested: boolean;
   tlsCompatible: boolean;
   /**
-   * Present only when the key was stored in the software keystore (useHardwareKey === false).
-   * Hardware-backed keys live in the Android Keystore and have no keystore file to describe.
+   * Android only. Present when the key was stored in the software keystore
+   * (useHardwareKey === false) on Android. Hardware-backed keys live in the Android
+   * Keystore and have no keystore file to describe. On iOS this field is always
+   * absent — keys are stored in the Keychain, not a file, regardless of useHardwareKey.
    */
   keystore?: CSRKeystoreDescriptor;
 }

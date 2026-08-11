@@ -131,7 +131,8 @@ interface CSRResult {
   useHardwareKey: boolean;        // Final decision (software or hardware)
   hardwareKeyRequested: boolean;  // What the app requested
   tlsCompatible: boolean;         // Device supports hardware keys for TLS
-  keystore?: {                    // Present only when useHardwareKey is false
+  keystore?: {                    // Android only. Present when useHardwareKey is false.
+                                   // Always absent on iOS (keys live in the Keychain, not a file).
     path: string;                 // Absolute path to the PKCS12 keystore file
     password: string;             // Keystore password (currently always empty)
     format: 'pkcs12';
@@ -173,7 +174,8 @@ Generates a Certificate Signing Request with the specified parameters.
   useHardwareKey: boolean;        // Final decision (software or hardware)
   hardwareKeyRequested: boolean;  // What the app requested
   tlsCompatible: boolean;         // Device supports hardware keys for TLS
-  keystore?: {                    // Present only when useHardwareKey is false
+  keystore?: {                    // Android only. Present when useHardwareKey is false.
+                                   // Always absent on iOS (keys live in the Keychain, not a file).
     path: string;                 // Absolute path to the PKCS12 keystore file
     password: string;             // Keystore password (currently always empty)
     format: 'pkcs12';
