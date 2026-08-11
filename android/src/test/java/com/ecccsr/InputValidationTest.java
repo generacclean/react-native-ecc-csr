@@ -11,9 +11,9 @@ import org.robolectric.RuntimeEnvironment;
 import static org.junit.Assert.*;
 
 /**
- * Unit tests for input validation. Delegates to the real CSRModule.isValidIPAddress /
- * sanitizeDNValue rather than re-declaring the logic, so these tests fail if production
- * behavior changes.
+ * Unit tests for input validation. Every assertion delegates to the real CSRModule
+ * validator (isValidIPAddress / isValidCurve / isValidAlias / sanitizeDNValue) rather
+ * than re-declaring the logic, so these tests fail if production behavior changes.
  */
 @RunWith(RobolectricTestRunner.class)
 public class InputValidationTest {
@@ -112,12 +112,7 @@ public class InputValidationTest {
     }
 
     private boolean isValidCurve(String curve) {
-        if (curve == null || curve.trim().isEmpty()) {
-            return false;
-        }
-        return curve.equals("secp256r1") ||
-               curve.equals("secp384r1") ||
-               curve.equals("secp521r1");
+        return module.isValidCurve(curve);
     }
 
     @Test
@@ -133,7 +128,7 @@ public class InputValidationTest {
     }
 
     private boolean isValidAlias(String alias) {
-        return alias != null && !alias.trim().isEmpty();
+        return module.isValidAlias(alias);
     }
 
     @Test

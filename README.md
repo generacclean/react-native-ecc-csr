@@ -340,6 +340,28 @@ const result: CSRResult = await CSRModule.generateCSR(params);
 
 These are automatically included by the module as transitive dependencies.
 
+**React Native compile version:** this module compiles against exactly
+`com.facebook.react:react-android:0.76.0` (`compileOnly`), pinned so `./gradlew test` works
+standalone outside a consuming app. The app supplies its own React Native version at
+runtime, which is fine while the bridge API this module uses (`Promise`,
+`ReactApplicationContext`, `ReadableMap`, `WritableMap`) stays stable. Bump the pin in
+`android/build.gradle` deliberately - notably for the Turbo Modules migration (IA-5752).
+
+## Testing
+
+Android logic is covered by JVM unit tests (Robolectric) and gated in CI by
+`.github/workflows/android-tests.yml`:
+
+```bash
+cd android && ./gradlew test
+```
+
+See `android/src/test/README.md` for what is and isn't covered.
+
+**iOS has no automated test coverage.** `ios/CSRModule.m` carries the other half of this
+module and is verified manually only, so a CSR-format regression on iOS would not be caught
+by CI. Exercise iOS changes against a real device or simulator before release.
+
 ## Android Configuration
 
 ### ProGuard/R8 Rules

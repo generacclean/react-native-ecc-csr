@@ -8,6 +8,10 @@
   "source": "src/index.ts",
   "files": [
     "android",
+    "!android/build",
+    "!android/build/**",
+    "!android/.gradle",
+    "!android/.gradle/**",
     "ios",
     "react-native-ecc-csr.podspec",
     "src",

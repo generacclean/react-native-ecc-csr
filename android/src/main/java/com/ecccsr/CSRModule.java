@@ -441,6 +441,25 @@ public class CSRModule extends ReactContextBaseJavaModule {
     }
 
     /**
+     * Package-private (not private) so unit tests assert against the same alias rule
+     * generateCSRInternal enforces, rather than a copy that can drift from production.
+     */
+    boolean isValidAlias(String alias) {
+        return alias != null && !alias.trim().isEmpty();
+    }
+
+    /**
+     * Package-private (not private) so unit tests assert against the same curve allow-list
+     * generateCSRInternal enforces, rather than a copy that can drift from production.
+     */
+    boolean isValidCurve(String curve) {
+        return curve != null
+                && (curve.equals("secp256r1")
+                    || curve.equals("secp384r1")
+                    || curve.equals("secp521r1"));
+    }
+
+    /**
      * IP address validation - accepts only literal IP addresses, not hostnames.
      *
      * InetAddress.getByName() accepts hostnames that resolve via DNS, so we must
@@ -481,10 +500,13 @@ public class CSRModule extends ReactContextBaseJavaModule {
             // For IPv6, also check if both addresses contain colons (not port numbers)
             // Port notation like "host:8080" should be rejected
             if (inputForComparison.contains(":")) {
-                // Count colons - IPv6 has multiple, port notation has one
+                // Defense-in-depth: every valid IPv6 literal has at least 2 colons (even "::"),
+                // and InetAddress.getByName already throws UnknownHostException above for a
+                // single-colon string like "host:8080" before this line is reached - so this
+                // branch is not currently reachable, but is kept in case that parsing behavior
+                // ever changes across JVM/Android versions.
                 int colonCount = inputForComparison.length() - inputForComparison.replace(":", "").length();
                 if (colonCount < 2) {
-                    // Likely "hostname:port" format, not IPv6
                     return false;
                 }
 
@@ -563,17 +585,66 @@ public class CSRModule extends ReactContextBaseJavaModule {
         final boolean tlsCompatible;
         final String keystorePath; // null when useHardwareKey is true
 
-        CSRGenerationResult(String csr, String privateKeyAlias, String publicKeyBase64,
-                             boolean isHardwareBacked, boolean useHardwareKey,
-                             boolean hardwareKeyRequested, boolean tlsCompatible, String keystorePath) {
-            this.csr = csr;
-            this.privateKeyAlias = privateKeyAlias;
-            this.publicKeyBase64 = publicKeyBase64;
-            this.isHardwareBacked = isHardwareBacked;
-            this.useHardwareKey = useHardwareKey;
-            this.hardwareKeyRequested = hardwareKeyRequested;
-            this.tlsCompatible = tlsCompatible;
-            this.keystorePath = keystorePath;
+        private CSRGenerationResult(Builder builder) {
+            this.csr = builder.csr;
+            this.privateKeyAlias = builder.privateKeyAlias;
+            this.publicKeyBase64 = builder.publicKeyBase64;
+            this.isHardwareBacked = builder.isHardwareBacked;
+            this.useHardwareKey = builder.useHardwareKey;
+            this.hardwareKeyRequested = builder.hardwareKeyRequested;
+            this.tlsCompatible = builder.tlsCompatible;
+            this.keystorePath = builder.keystorePath;
+        }
+
+        static Builder builder(String csr, String privateKeyAlias, String publicKeyBase64) {
+            return new Builder(csr, privateKeyAlias, publicKeyBase64);
+        }
+
+        // Named setters so call sites can't silently swap same-typed boolean arguments.
+        static class Builder {
+            private final String csr;
+            private final String privateKeyAlias;
+            private final String publicKeyBase64;
+            private boolean isHardwareBacked;
+            private boolean useHardwareKey;
+            private boolean hardwareKeyRequested;
+            private boolean tlsCompatible;
+            private String keystorePath;
+
+            private Builder(String csr, String privateKeyAlias, String publicKeyBase64) {
+                this.csr = csr;
+                this.privateKeyAlias = privateKeyAlias;
+                this.publicKeyBase64 = publicKeyBase64;
+            }
+
+            Builder isHardwareBacked(boolean value) {
+                this.isHardwareBacked = value;
+                return this;
+            }
+
+            Builder useHardwareKey(boolean value) {
+                this.useHardwareKey = value;
+                return this;
+            }
+
+            Builder hardwareKeyRequested(boolean value) {
+                this.hardwareKeyRequested = value;
+                return this;
+            }
+
+            Builder tlsCompatible(boolean value) {
+                this.tlsCompatible = value;
+                return this;
+            }
+
+            Builder keystorePath(String value) {
+                this.keystorePath = value;
+                return this;
+            }
+
+            CSRGenerationResult build() {
+                return new CSRGenerationResult(this);
+            }
         }
     }
 
@@ -638,12 +709,12 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String privateKeyAlias = params.hasKey("privateKeyAlias") ? params.getString("privateKeyAlias") : null;
 
             // Validate required parameters
-            if (privateKeyAlias == null || privateKeyAlias.trim().isEmpty()) {
+            if (!isValidAlias(privateKeyAlias)) {
                 throw new CSRRejectedException("MISSING_ALIAS", "privateKeyAlias is required");
             }
             privateKeyAlias = privateKeyAlias.trim();
 
-            if (!curve.equals("secp256r1") && !curve.equals("secp384r1") && !curve.equals("secp521r1")) {
+            if (!isValidCurve(curve)) {
                 throw new CSRRejectedException("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1");
             }
 
@@ -779,15 +850,16 @@ public class CSRModule extends ReactContextBaseJavaModule {
                   (requestedHardwareKey ? "hardware" : "software") +
                   ", actual: " + (useHardwareKey ? "hardware" : "software") + ")");
 
-            return new CSRGenerationResult(
+            return CSRGenerationResult.builder(
                     csrWriter.toString(),
                     privateKeyAlias,
-                    Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP),
-                    useHardwareKey && isHardwareBacked(privateKeyAlias),
-                    useHardwareKey,
-                    requestedHardwareKey,
-                    canUseHardwareKeysForTLS(),
-                    keystorePath);
+                    Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP))
+                    .isHardwareBacked(useHardwareKey && isHardwareBacked(privateKeyAlias))
+                    .useHardwareKey(useHardwareKey)
+                    .hardwareKeyRequested(requestedHardwareKey)
+                    .tlsCompatible(canUseHardwareKeysForTLS())
+                    .keystorePath(keystorePath)
+                    .build();
 
         } catch (CSRRejectedException e) {
             throw e;

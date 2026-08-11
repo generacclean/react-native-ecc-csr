@@ -21,7 +21,10 @@ import org.robolectric.util.ReflectionHelpers;
 import java.io.File;
 import java.io.StringReader;
 import java.security.KeyStore;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.List;
 
 import static org.junit.Assert.*;
 
@@ -42,6 +45,18 @@ public class CSRModuleTest {
         FakeReactApplicationContext context =
                 new FakeReactApplicationContext(RuntimeEnvironment.getApplication());
         module = new CSRModule(context);
+
+        // Robolectric may hand out the same app files directory to more than one test method,
+        // so a leftover keystore or quarantined file would let the corruption tests below pass
+        // on another test's artifacts. Start every test from a known-empty directory.
+        File keystoreFile = module.getKeystoreFile();
+        keystoreFile.delete();
+        File[] leftovers = forensicsDir(keystoreFile).listFiles();
+        if (leftovers != null) {
+            for (File leftover : leftovers) {
+                leftover.delete();
+            }
+        }
     }
 
     @After
@@ -212,30 +227,68 @@ public class CSRModuleTest {
 
         // Quarantined files live in a keystore_forensics/ subdirectory (not alongside the live
         // keystore file) so a single backup-exclusion entry can cover all timestamped filenames.
-        File forensicsDir = new File(keystoreFile.getParentFile(), "keystore_forensics");
-        File[] corrupted = forensicsDir.listFiles((dir, name) -> name.startsWith(keystoreFile.getName() + ".corrupted."));
-        assertNotNull(corrupted);
-        assertTrue("corrupt file should have been quarantined with a .corrupted. suffix", corrupted.length >= 1);
+        // setUp() empties that directory, so an exact count proves this corruption produced the
+        // file rather than an earlier test leaving one behind.
+        List<String> corrupted = quarantinedNames(keystoreFile);
+        assertEquals("this corruption should have quarantined exactly one .corrupted. file",
+                1, corrupted.size());
     }
 
     @Test
     public void corruptedFileRetention_cappedAtThreeMostRecent() throws Exception {
         module.generateCSRInternal(paramsFor("retention-seed-alias", "secp256r1"));
         File keystoreFile = module.getKeystoreFile();
-        File forensicsDir = new File(keystoreFile.getParentFile(), "keystore_forensics");
 
-        // Simulate 5 prior corruption cycles by corrupting + regenerating 5 times.
+        // Simulate 5 corruption cycles, recording the quarantine filename each one produces so
+        // the retention *order* can be asserted, not just the surviving count.
+        List<String> quarantinedInOrder = new ArrayList<>();
         for (int i = 0; i < 5; i++) {
             try (java.io.FileOutputStream fos = new java.io.FileOutputStream(keystoreFile)) {
                 fos.write(("corrupt-" + i).getBytes());
             }
+            // cleanupCorruptedFiles() ranks by lastModified and the quarantine filename carries a
+            // millisecond timestamp, so separate the cycles enough that neither can tie: a tie
+            // would make which-3-survive nondeterministic, and an identical filename would let
+            // renameTo silently overwrite an earlier quarantine.
+            Thread.sleep(10);
             module.generateCSRInternal(paramsFor("retention-alias-" + i, "secp256r1"));
+
+            for (String name : quarantinedNames(keystoreFile)) {
+                if (!quarantinedInOrder.contains(name)) {
+                    quarantinedInOrder.add(name);
+                }
+            }
         }
 
-        File[] corrupted = forensicsDir.listFiles((dir, name) -> name.startsWith(keystoreFile.getName() + ".corrupted."));
-        assertNotNull(corrupted);
+        assertEquals("each of the 5 corruption cycles should quarantine a distinctly-named file",
+                5, quarantinedInOrder.size());
+
+        List<String> survivors = quarantinedNames(keystoreFile);
         assertEquals("exactly 3 .corrupted files should be retained after 5 corruption cycles",
-                3, corrupted.length);
+                3, survivors.size());
+
+        // Pin *which* 3 survive: the 3 most recently quarantined, i.e. the last 3 created.
+        List<String> expected = new ArrayList<>(quarantinedInOrder.subList(2, 5));
+        Collections.sort(expected);
+        Collections.sort(survivors);
+        assertEquals("retention must keep the 3 most recent quarantined files and drop the oldest 2",
+                expected, survivors);
+    }
+
+    private File forensicsDir(File keystoreFile) {
+        return new File(keystoreFile.getParentFile(), "keystore_forensics");
+    }
+
+    private List<String> quarantinedNames(File keystoreFile) {
+        File[] files = forensicsDir(keystoreFile).listFiles(
+                (dir, name) -> name.startsWith(keystoreFile.getName() + ".corrupted."));
+        List<String> names = new ArrayList<>();
+        if (files != null) {
+            for (File file : files) {
+                names.add(file.getName());
+            }
+        }
+        return names;
     }
 
     // ---- Input validation: exercise the real production isValidIPAddress ----
@@ -260,10 +313,30 @@ public class CSRModuleTest {
 
     @Test
     public void isValidIPAddress_rejectsHostnamePortInjection() {
-        // The ":"-gated hostname-injection case: "host:8080" has exactly one colon,
-        // which must not be mistaken for a compressed IPv6 literal.
+        // "host:port" strings are rejected by InetAddress.getByName() itself - a single
+        // colon is not valid syntax for a hostname or an IP literal, so this fails via the
+        // outer UnknownHostException catch rather than the colon-counting IPv6 guard below it.
         assertFalse(module.isValidIPAddress("example.com:8080"));
         assertFalse(module.isValidIPAddress("evil-host:1"));
+    }
+
+    @Test
+    public void isValidIPAddress_acceptsBracketedIPv6() {
+        // Covers the bracket-stripping normalization, which no other test input reaches: a
+        // bracketed literal only compares equal to getHostAddress()'s unbracketed expanded form
+        // after the brackets are removed. Like bare "::1", it then decides in the colon branch
+        // via the re-parse comparison (the "host:port" cases above never get that far).
+        assertTrue(module.isValidIPAddress("[::1]"));
+        assertTrue(module.isValidIPAddress("[2001:db8::1]"));
+    }
+
+    @Test
+    public void isValidIPAddress_rejectsHostnamesWithoutRelyingOnDNS() {
+        // ".invalid" is reserved by RFC 2606 and must never resolve, so this rejection is a
+        // real hostname rejection on any runner - unlike "example.com", which passes via the
+        // literal-comparison path when DNS resolves and via UnknownHostException when it
+        // doesn't, and so would pass vacuously on a CI runner with no resolver.
+        assertFalse(module.isValidIPAddress("not-a-real-host.invalid"));
     }
 
     @Test
@@ -383,6 +456,8 @@ public class CSRModuleTest {
         assertTrue(result.hardwareKeyRequested);
         assertFalse("device isn't TLS-compatible for hardware keys, must fall back to software",
                 result.useHardwareKey);
+        assertFalse("software fallback key can't be hardware-backed", result.isHardwareBacked);
+        assertFalse("API 30 device must report TLS-incompatible", result.tlsCompatible);
         assertNotNull("fallback to software must still produce a keystore descriptor",
                 result.keystorePath);
     }
