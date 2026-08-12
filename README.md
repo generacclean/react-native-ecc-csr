@@ -10,13 +10,15 @@ A React Native module for generating Certificate Signing Requests (CSR) with Ell
 
 **Storage:** Software-backed keys are stored in a PKCS12 file in the app's private no-backup directory (`Context.getNoBackupFilesDir()`, i.e. `/data/data/<your.package>/no_backup/software_keys.p12`). The file is protected by Android OS-level security (file permissions 0600, app sandboxing) but **not encrypted at rest**.
 
-**Backup Exclusion:** No configuration required. Android never includes `getNoBackupFilesDir()` in Auto Backup, cloud backup, or device-to-device transfer, so the private key cannot leave the device through backup infrastructure no matter what your app sets for `android:allowBackup`, `android:fullBackupContent`, or `android:dataExtractionRules`.
+**Backup Exclusion (Android):** No configuration required. Android never includes `getNoBackupFilesDir()` in Auto Backup, cloud backup, or device-to-device transfer, so the private key cannot leave the device through backup infrastructure no matter what your app sets for `android:allowBackup`, `android:fullBackupContent`, or `android:dataExtractionRules`.
+
+**iOS is different — do not read the guarantee above as cross-platform.** iOS keys live in the Keychain, not in a file, so none of the directory or manifest discussion applies. `ios/CSRModule.m` adds Keychain items without an explicit `kSecAttrAccessible` value, which means they default to `kSecAttrAccessibleWhenUnlocked` — and an *encrypted* iTunes/Finder backup **does** include items with that accessibility. Only the `…ThisDeviceOnly` variants are excluded. Secure Enclave keys (`useHardwareKey: true`) are non-exportable regardless. Treat a software-backed iOS key as backup-eligible until this module sets `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
 
 Earlier versions shipped `backup_rules.xml` and `data_extraction_rules.xml` for the consuming app to reference from its manifest. Those files have been **removed** — the approach could not be made reliable, because `android:fullBackupContent` and `android:dataExtractionRules` each accept exactly one resource reference and nothing merges them. Any other library that claimed either attribute (`expo-secure-store`, for example) silently deactivated this module's exclusions. If your manifest or config plugin still references `@xml/backup_rules` or `@xml/data_extraction_rules` from this package, remove those references; nothing else is needed in their place.
 
 Keys created with `useHardwareKey=true` live in the Android Keystore and are non-exportable, so they were never backup-eligible.
 
-**Migration:** installs created before this change hold the keystore at `files/software_keys.p12`. The module moves it (plus any quarantined corrupt copies) into `no_backup/` on first keystore access and deletes the backup-eligible original, so no action is needed from the app. If your app persists the `keystorePath` returned by `generateCSR`, re-read it rather than trusting a cached value across the upgrade — the directory changes.
+**Migration:** installs created before this change hold the keystore at `files/software_keys.p12`, plus any quarantined corrupt copies at `files/software_keys.p12.corrupted.<timestamp>` — each of those is a complete copy of a private key. The module moves all of them into `no_backup/` on first keystore access (quarantined copies land in `no_backup/keystore_forensics/`) and deletes the backup-eligible originals, so no action is needed from the app. If your app persists the `keystorePath` returned by `generateCSR`, re-read it rather than trusting a cached value across the upgrade — the directory changes.
 
 **Security Recommendations:**
 - ✅ **Production apps:** Use `useHardwareKey=true` on Android 12+ devices whenever possible
@@ -132,7 +134,7 @@ interface CSRResult {
   keystore?: {                    // Android only. Present when useHardwareKey is false.
                                    // Always absent on iOS (keys live in the Keychain, not a file).
     path: string;                 // Absolute path to the PKCS12 keystore file
-    password: string;             // Keystore password (currently always empty)
+    password?: string;            // Optional; today always "" (see CSRKeystoreDescriptor)
     format: 'pkcs12';
   };
 }
@@ -175,7 +177,7 @@ Generates a Certificate Signing Request with the specified parameters.
   keystore?: {                    // Android only. Present when useHardwareKey is false.
                                    // Always absent on iOS (keys live in the Keychain, not a file).
     path: string;                 // Absolute path to the PKCS12 keystore file
-    password: string;             // Keystore password (currently always empty)
+    password?: string;            // Optional; today always "" (see CSRKeystoreDescriptor)
     format: 'pkcs12';
   };
 }
@@ -359,7 +361,7 @@ See `android/src/test/README.md` for what is and isn't covered.
 Robolectric tests run against API 33, pinned in `android/src/test/resources/robolectric.properties`
 and backed by `testOptions.unitTests.includeAndroidResources`. Both are required: without the merged
 manifest, Robolectric falls back to legacy resources mode, which is unsupported after API 28 and
-silently drops every Robolectric test down to its API 16 floor — nine levels below this module's
+silently drops every Robolectric test down to its API 16 floor — seven levels below this module's
 `minSdk 23`. Platform APIs newer than 16 then fail at runtime with `NoSuchMethodError` despite
 compiling cleanly. Tests that need a specific level still override `Build.VERSION.SDK_INT` locally.
 
@@ -485,7 +487,7 @@ Understanding the security implications of different key storage methods is impo
 
    Those files were removed because the mechanism could not be made to work from inside a library: `android:fullBackupContent` and `android:dataExtractionRules` each accept exactly one resource reference, and nothing merges rule sets across libraries. If any other dependency claimed either attribute — `expo-secure-store` does, via its own config plugin — this module's exclusions were silently inactive, with no build error and no runtime warning. Storing the key outside the backup set removes the coordination problem instead of documenting around it.
 
-   **Migration for existing installs:** the keystore moves from `files/software_keys.p12` to `no_backup/software_keys.p12` on first keystore access, along with any quarantined corrupt copies. The backup-eligible original is deleted, not merely abandoned. If your app caches the `keystorePath` from a previous `generateCSR` call, re-read it after upgrading.
+   **Migration for existing installs:** the keystore moves from `files/software_keys.p12` to `no_backup/software_keys.p12` on first keystore access, along with any quarantined corrupt copies — `files/software_keys.p12.corrupted.<timestamp>` files written by earlier releases move into `no_backup/keystore_forensics/`, and the retention cap of three is applied there. The backup-eligible originals are deleted, not merely abandoned. If the live keystore cannot be relocated, the call fails rather than returning the new path, so an existing key is never shadowed by an empty keystore. If your app caches the `keystorePath` from a previous `generateCSR` call, re-read it after upgrading.
 
    **Verification:**
    ```bash

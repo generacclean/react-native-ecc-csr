@@ -10,6 +10,7 @@ import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.UIManager;
 import com.facebook.react.turbomodule.core.interfaces.CallInvokerHolder;
 
+import java.io.File;
 import java.util.Collections;
 
 /**
@@ -19,8 +20,24 @@ import java.util.Collections;
  */
 public class FakeReactApplicationContext extends ReactApplicationContext {
 
+    private boolean noBackupFilesDirUnavailable = false;
+
     public FakeReactApplicationContext(Context base) {
         super(base);
+    }
+
+    /**
+     * Simulate a platform that returns no no-backup directory. Lets tests assert that the module
+     * refuses to fall back to an unprotected path rather than silently writing the private key
+     * relative to the process working directory.
+     */
+    public void setNoBackupFilesDirUnavailable(boolean unavailable) {
+        this.noBackupFilesDirUnavailable = unavailable;
+    }
+
+    @Override
+    public File getNoBackupFilesDir() {
+        return noBackupFilesDirUnavailable ? null : super.getNoBackupFilesDir();
     }
 
     @Override

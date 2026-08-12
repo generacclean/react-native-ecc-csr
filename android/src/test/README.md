@@ -78,6 +78,11 @@ in this JVM-only test environment):
 - CSR generation for P-256/P-384/P-521 with a parseable, correctly-signed CSR
 - Key lifecycle: create → keyExists → getPublicKey → deleteKey → keyExists
 - Software keystore round-trip: write then reload the PKCS12 file
+- Backup exclusion: the keystore lives in `getNoBackupFilesDir()`, and legacy copies in
+  `getFilesDir()` (keystore, `.tmp`, and quarantined `.corrupted.*` files in both the flat
+  and `keystore_forensics/` layouts) are relocated out of backup-eligible storage
+- Migration failure modes: an unavailable no-backup directory or a keystore that cannot be
+  relocated fails loudly instead of shadowing an existing key with an empty keystore
 - Corruption handling: corrupt keystore quarantine and `.corrupted` retention cap
 - Input validation (IP address, curve, alias) against the real production methods
 - Hardware capability detection across SDK versions
@@ -86,7 +91,8 @@ in this JVM-only test environment):
 
 Tests use:
 - **JUnit 4.13.2** - Test framework
-- **Mockito 5.3.1** - Mocking framework (for future tests)
+- **Mockito 5.3.1** - Mocking framework, used by `CSRModuleTest` to `mockStatic` the
+  RN `Arguments` factory, which otherwise needs a native JNI library
 - **Robolectric 4.10.3** - Android framework simulation, used by `CSRModuleTest`
   and `InputValidationTest` to instantiate `CSRModule` with a fake
   `ReactApplicationContext` (see `testutil/FakeReactApplicationContext.java`)
@@ -181,10 +187,12 @@ to override react-android's `minSdkVersion 24` for the test variant; it is not p
 
 ## Next Steps
 
-1. **Add Mockito tests** for CSRModule methods
-2. **Add Robolectric tests** for Android-specific code
-3. **Add integration tests** in separate directory
-4. **Set up CI pipeline** to run tests automatically
+Mockito and Robolectric coverage of `CSRModule` and a blocking CI pipeline
+(`.github/workflows/android-tests.yml`) are in place. What's left:
+
+1. **Add instrumented tests** in a separate directory for the hardware-keystore paths
+   listed under "What's NOT Tested" above
+2. **Add iOS test coverage** — `ios/CSRModule.m` is verified manually only
 
 ## Troubleshooting
 

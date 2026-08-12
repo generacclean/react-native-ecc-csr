@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.List;
 
 import static org.junit.Assert.*;
+import static org.junit.Assume.assumeTrue;
 
 /**
  * Unit tests for CSRModule that exercise the real production code (via generateCSRInternal /
@@ -58,6 +59,15 @@ public class CSRModuleTest {
             File[] leftovers = new File(dir, "keystore_forensics").listFiles();
             if (leftovers != null) {
                 for (File leftover : leftovers) {
+                    leftover.delete();
+                }
+            }
+            // Pre-subdirectory releases quarantined corrupt keystores flat in the files dir, and
+            // the migration test below stages one there.
+            File[] flatQuarantined = dir.listFiles(
+                    (unused, name) -> name.startsWith(KEYSTORE_NAME + ".corrupted."));
+            if (flatQuarantined != null) {
+                for (File leftover : flatQuarantined) {
                     leftover.delete();
                 }
             }
@@ -216,7 +226,7 @@ public class CSRModuleTest {
     // ---- Backup exclusion: the key lives outside the backup set, and legacy copies are moved ----
 
     @Test
-    public void keystore_livesInNoBackupDirectory() {
+    public void keystore_livesInNoBackupDirectory() throws Exception {
         File keystoreFile = module.getKeystoreFile();
 
         // getNoBackupFilesDir() is excluded from Auto Backup, cloud backup and device transfer
@@ -270,18 +280,91 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void legacyTempKeystore_isDeleted() {
+    public void legacyTempKeystore_isDeleted() throws Exception {
         // An interrupted atomic write leaves a .tmp that is a complete copy of the keystore.
         File legacyTemp = new File(context.getFilesDir(), KEYSTORE_NAME + ".tmp");
         try (java.io.FileOutputStream fos = new java.io.FileOutputStream(legacyTemp)) {
             fos.write("interrupted write holding a full keystore copy".getBytes());
-        } catch (java.io.IOException e) {
-            fail("could not stage legacy temp file: " + e.getMessage());
         }
 
         module.getKeystoreFile();
 
         assertFalse("leftover .tmp copies must not stay backup-eligible", legacyTemp.exists());
+    }
+
+    @Test
+    public void noBackupDirUnavailable_failsInsteadOfWritingToAnUnprotectedPath() {
+        context.setNoBackupFilesDirUnavailable(true);
+
+        // new File((File) null, "software_keys.p12") is legal Java and yields a bare relative path
+        // resolved against the process working directory - no backup exclusion, no 0600. Refusing
+        // is the only safe outcome, and it has to be loud rather than logged.
+        assertThrows(java.io.IOException.class, () -> module.getKeystoreFile());
+    }
+
+    @Test
+    public void noBackupDirUnavailable_keyExistsRejectsInsteadOfAnsweringFalse() {
+        context.setNoBackupFilesDirUnavailable(true);
+
+        RecordingPromise promise = new RecordingPromise();
+        module.keyExists("some-alias", promise);
+
+        // The software-keystore branch normally swallows failures and resolves false. Doing that
+        // when storage itself is unreachable would tell the app its key is gone, and the app would
+        // re-enrol with a new key while its issued certificate silently stopped matching.
+        assertTrue("unreachable keystore storage must reject, not resolve false", promise.rejected);
+        assertEquals("KEY_EXISTS_ERROR", promise.rejectedCode);
+    }
+
+    @Test
+    public void legacyKeystoreMigrationFailure_failsLoudlyInsteadOfShadowingTheKey() throws Exception {
+        // Stage a real keystore where pre-migration installs kept it, then make the destination
+        // directory unwritable so renameTo cannot succeed.
+        String alias = "migration-failure-alias";
+        module.generateCSRInternal(paramsFor(alias, "secp256r1"));
+        File noBackupDir = context.getNoBackupFilesDir();
+        File current = new File(noBackupDir, KEYSTORE_NAME);
+        File legacy = new File(context.getFilesDir(), KEYSTORE_NAME);
+        assertTrue(current.renameTo(legacy));
+
+        // setWritable() must be inside the try: as root it "succeeds" without actually revoking
+        // write access, and skipping the test at that point would leave the directory unwritable
+        // for every test that runs after this one.
+        boolean unwritable = noBackupDir.setWritable(false) && !noBackupDir.canWrite();
+        try {
+            assumeTrue("requires a filesystem where the destination dir can be made unwritable",
+                    unwritable);
+
+            // Returning the no-backup path here would make loadSoftwareKeyStore() see no file and
+            // build an empty keystore, so the device would re-enrol with a new key while its issued
+            // certificate silently stopped matching - and the old key would stay backup-eligible.
+            assertThrows(java.io.IOException.class, () -> module.getKeystoreFile());
+            assertTrue("the only copy of the key must be left intact for the next attempt",
+                    legacy.exists());
+        } finally {
+            noBackupDir.setWritable(true);
+        }
+    }
+
+    @Test
+    public void legacyFlatQuarantinedFiles_areMovedIntoNoBackupStorage() throws Exception {
+        // This is the layout an already-installed device actually holds: every release before the
+        // keystore_forensics/ subdirectory existed wrote quarantined copies flat into the files dir
+        // next to the live keystore. Each one is a complete copy of a private key, so a migration
+        // that only swept the subdirectory would leave them backup-eligible forever.
+        File legacyQuarantined =
+                new File(context.getFilesDir(), KEYSTORE_NAME + ".corrupted.20250101_000000");
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(legacyQuarantined)) {
+            fos.write("quarantined key material".getBytes());
+        }
+
+        module.getKeystoreFile();
+
+        assertFalse("flat quarantined copies must not stay in backup-eligible storage",
+                legacyQuarantined.exists());
+        assertTrue("flat quarantined copies should be relocated for forensics, not discarded",
+                new File(new File(context.getNoBackupFilesDir(), "keystore_forensics"),
+                        legacyQuarantined.getName()).exists());
     }
 
     @Test
@@ -342,10 +425,11 @@ public class CSRModuleTest {
             try (java.io.FileOutputStream fos = new java.io.FileOutputStream(keystoreFile)) {
                 fos.write(("corrupt-" + i).getBytes());
             }
-            // cleanupCorruptedFiles() ranks by lastModified and the quarantine filename carries a
-            // millisecond timestamp, so separate the cycles enough that neither can tie: a tie
-            // would make which-3-survive nondeterministic, and an identical filename would let
-            // renameTo silently overwrite an earlier quarantine.
+            // The quarantine filename carries a millisecond timestamp, and cleanupCorruptedFiles()
+            // ranks on that name rather than on lastModified() - so this sleep only has to outrun
+            // the millisecond clock, not the host filesystem's timestamp resolution. Without it two
+            // cycles could land in the same millisecond, producing an identical filename that
+            // renameTo would silently overwrite.
             Thread.sleep(10);
             module.generateCSRInternal(paramsFor("retention-alias-" + i, "secp256r1"));
 
