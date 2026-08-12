@@ -37,24 +37,29 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 public class CSRModuleTest {
 
+    private static final String KEYSTORE_NAME = "software_keys.p12";
+
     private CSRModule module;
+    private FakeReactApplicationContext context;
     private final int originalSdkInt = android.os.Build.VERSION.SDK_INT;
 
     @Before
     public void setUp() {
-        FakeReactApplicationContext context =
-                new FakeReactApplicationContext(RuntimeEnvironment.getApplication());
+        context = new FakeReactApplicationContext(RuntimeEnvironment.getApplication());
         module = new CSRModule(context);
 
-        // Robolectric may hand out the same app files directory to more than one test method,
-        // so a leftover keystore or quarantined file would let the corruption tests below pass
-        // on another test's artifacts. Start every test from a known-empty directory.
-        File keystoreFile = module.getKeystoreFile();
-        keystoreFile.delete();
-        File[] leftovers = forensicsDir(keystoreFile).listFiles();
-        if (leftovers != null) {
-            for (File leftover : leftovers) {
-                leftover.delete();
+        // Robolectric may hand out the same app directories to more than one test method, so a
+        // leftover keystore or quarantined file would let the corruption tests below pass on
+        // another test's artifacts. Start every test from a known-empty state, in both the live
+        // no-backup location and the legacy backup-eligible one the migration tests populate.
+        for (File dir : new File[] {context.getNoBackupFilesDir(), context.getFilesDir()}) {
+            new File(dir, KEYSTORE_NAME).delete();
+            new File(dir, KEYSTORE_NAME + ".tmp").delete();
+            File[] leftovers = new File(dir, "keystore_forensics").listFiles();
+            if (leftovers != null) {
+                for (File leftover : leftovers) {
+                    leftover.delete();
+                }
             }
         }
     }
@@ -205,7 +210,98 @@ public class CSRModuleTest {
         CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("descriptor-alias", "secp256r1"));
 
         assertNotNull("software-backed keys must expose a keystore descriptor", result.keystorePath);
-        assertTrue(result.keystorePath.endsWith("software_keys.p12"));
+        assertTrue(result.keystorePath.endsWith(KEYSTORE_NAME));
+    }
+
+    // ---- Backup exclusion: the key lives outside the backup set, and legacy copies are moved ----
+
+    @Test
+    public void keystore_livesInNoBackupDirectory() {
+        File keystoreFile = module.getKeystoreFile();
+
+        // getNoBackupFilesDir() is excluded from Auto Backup, cloud backup and device transfer
+        // unconditionally. That is what lets this module drop backup_rules.xml /
+        // data_extraction_rules.xml and the manifest wiring the consuming app previously had to get
+        // right - and it cannot be defeated by another library claiming the manifest attributes.
+        assertEquals(context.getNoBackupFilesDir(), keystoreFile.getParentFile());
+        assertNotEquals("keystore must not sit in the backup-eligible files dir",
+                context.getFilesDir(), keystoreFile.getParentFile());
+    }
+
+    @Test
+    public void legacyKeystore_isMovedOutOfBackupEligibleStorageWithKeysIntact() throws Exception {
+        // Produce a real keystore through production code, then stage it where installs created
+        // before the no-backup change kept it.
+        String alias = "legacy-migration-alias";
+        module.generateCSRInternal(paramsFor(alias, "secp256r1"));
+        File current = new File(context.getNoBackupFilesDir(), KEYSTORE_NAME);
+        File legacy = new File(context.getFilesDir(), KEYSTORE_NAME);
+        assertTrue("staging requires the generated keystore to start in no-backup storage",
+                current.renameTo(legacy));
+
+        // Any keystore access must relocate the file and leave the key usable.
+        RecordingPromise promise = new RecordingPromise();
+        module.keyExists(alias, promise);
+
+        assertEquals("migrated keystore must still contain the key", Boolean.TRUE, promise.resolvedValue);
+        assertTrue("keystore should have been migrated into no-backup storage", current.exists());
+        assertFalse("legacy backup-eligible copy must not survive migration", legacy.exists());
+    }
+
+    @Test
+    public void legacyKeystore_supersededByCurrentLocation_isDeleted() throws Exception {
+        module.generateCSRInternal(paramsFor("current-alias", "secp256r1"));
+        File current = new File(context.getNoBackupFilesDir(), KEYSTORE_NAME);
+        long currentLength = current.length();
+
+        // A stale pre-migration file next to a populated no-backup keystore still holds a private
+        // key in backup-eligible storage, so it has to be removed rather than ignored - and it must
+        // not clobber the live keystore on its way out.
+        File legacy = new File(context.getFilesDir(), KEYSTORE_NAME);
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(legacy)) {
+            fos.write("stale pre-migration keystore".getBytes());
+        }
+
+        module.getKeystoreFile();
+
+        assertFalse("stale legacy keystore must be deleted", legacy.exists());
+        assertEquals("live keystore must not be overwritten by the stale copy",
+                currentLength, current.length());
+    }
+
+    @Test
+    public void legacyTempKeystore_isDeleted() {
+        // An interrupted atomic write leaves a .tmp that is a complete copy of the keystore.
+        File legacyTemp = new File(context.getFilesDir(), KEYSTORE_NAME + ".tmp");
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(legacyTemp)) {
+            fos.write("interrupted write holding a full keystore copy".getBytes());
+        } catch (java.io.IOException e) {
+            fail("could not stage legacy temp file: " + e.getMessage());
+        }
+
+        module.getKeystoreFile();
+
+        assertFalse("leftover .tmp copies must not stay backup-eligible", legacyTemp.exists());
+    }
+
+    @Test
+    public void legacyQuarantinedFiles_areMovedIntoNoBackupStorage() throws Exception {
+        File legacyForensicsDir = new File(context.getFilesDir(), "keystore_forensics");
+        assertTrue(legacyForensicsDir.isDirectory() || legacyForensicsDir.mkdirs());
+        File legacyQuarantined =
+                new File(legacyForensicsDir, KEYSTORE_NAME + ".corrupted.20250101_000000000");
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(legacyQuarantined)) {
+            fos.write("quarantined key material".getBytes());
+        }
+
+        module.getKeystoreFile();
+
+        assertFalse("quarantined copies must not stay in backup-eligible storage",
+                legacyQuarantined.exists());
+        assertTrue("quarantined copies should be relocated for forensics, not discarded",
+                new File(new File(context.getNoBackupFilesDir(), "keystore_forensics"),
+                        legacyQuarantined.getName()).exists());
+        assertFalse("emptied legacy forensics directory should be removed", legacyForensicsDir.exists());
     }
 
     // ---- Corruption handling: corrupt keystore is quarantined, regeneration proceeds ----

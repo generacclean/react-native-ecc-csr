@@ -170,7 +170,14 @@ Perfect for GitHub Actions, Jenkins, etc.
 | Key Generation (software) | ✅ Covered | ✅ Good (`CSRModuleTest`, via Robolectric) |
 | Key Generation (hardware/StrongBox) | 0% | ❌ Needs real-device/emulator tests |
 | Keystore round-trip / corruption recovery | ✅ Covered | ✅ Good (`CSRModuleTest`) |
+| No-backup storage / legacy keystore migration | ✅ Covered | ✅ Good (`CSRModuleTest`) |
 | Concurrency | 0% | ❌ Needs integration tests |
+
+Robolectric tests run at API 33, pinned in `resources/robolectric.properties` and dependent on
+`testOptions.unitTests.includeAndroidResources` in `android/build.gradle`. Removing either drops
+Robolectric into legacy resources mode and back to its API 16 floor, where it skips or fails
+anything using a platform API newer than API 16. `AndroidManifest.xml` in this directory exists only
+to override react-android's `minSdkVersion 24` for the test variant; it is not published.
 
 ## Next Steps
 

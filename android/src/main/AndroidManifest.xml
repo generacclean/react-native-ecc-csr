@@ -1,35 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!--
-      Library manifest - these attributes are merged with the consuming app's manifest
+      Library manifest - intentionally declares no application attributes.
 
-      CRITICAL SECURITY: Backup exclusion rules are defined in TWO files:
-      1. backup_rules.xml - Legacy format for Android 11 and below
-      2. data_extraction_rules.xml - New format for Android 12+ (API 31+)
+      BACKUP EXCLUSION: no manifest configuration is required by the consuming app.
 
-      The consuming app MUST include BOTH:
-        android:fullBackupContent="@xml/backup_rules"             (API 23-30)
-        android:dataExtractionRules="@xml/data_extraction_rules"  (API 31+)
+      The software keystore is stored in Context.getNoBackupFilesDir(), which Android never
+      includes in Auto Backup, cloud backup, or device-to-device transfer. That holds regardless
+      of the app's android:allowBackup, android:fullBackupContent, or android:dataExtractionRules
+      values, so the private key cannot leave the device through backup infrastructure even if the
+      app opts into full backups.
 
-      Without BOTH attributes, the software keystore WILL be backed up on some devices:
-      - Without fullBackupContent: Backed up on Android 6-11
-      - Without dataExtractionRules: Backed up on Android 12+
+      This replaces the previous approach of shipping backup_rules.xml / data_extraction_rules.xml
+      for the app to reference. That approach could not be made reliable: each of
+      android:fullBackupContent and android:dataExtractionRules accepts exactly one resource
+      reference and nothing merges them, so if any other library (expo-secure-store, for example)
+      or the app itself set either attribute, this module's exclusions were silently inactive. The
+      no-backup directory needs no coordination between libraries, so both XML files were removed.
 
-      Alternative: Set android:allowBackup="false" to disable all backups (may break
-      user data backup/restore for the app).
-
-      Example consuming app AndroidManifest.xml:
-        <application
-            android:allowBackup="true"
-            android:fullBackupContent="@xml/backup_rules"
-            android:dataExtractionRules="@xml/data_extraction_rules">
-
-      This library provides both XML files, but nothing merges them automatically.
-      Each of android:fullBackupContent and android:dataExtractionRules accepts exactly
-      one resource reference, so the consuming app's manifest must point directly at
-      these files. If another library (e.g. expo-secure-store) also sets either
-      attribute, that is a manifest-merger conflict, not a union - only one library's
-      rules take effect, and this module's exclusions are silently inactive unless the
-      consuming app composes the rule sets itself.
+      Keys generated with useHardwareKey are held in the Android Keystore and are non-exportable,
+      so they are not backup-eligible in the first place.
     -->
 </manifest>

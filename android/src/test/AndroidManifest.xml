@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Unit-test-only manifest. Exists so Robolectric gets a real merged manifest (see
+  testOptions.unitTests.includeAndroidResources in build.gradle) instead of falling back to
+  legacy resources mode.
+
+  react-android declares minSdkVersion 24 while this module publishes minSdk 23. That is not a
+  conflict for consumers: React Native is a compileOnly dependency here, so it never enters the
+  published AAR's manifest and the effective floor is whatever the consuming app's own React
+  Native version requires. It only collides in the unit-test variant, where react-android is a
+  testImplementation dependency and its manifest joins the merge. Override it for tests rather
+  than raising the published minSdk on account of a test-only dependency.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-sdk tools:overrideLibrary="com.facebook.react" />
+
+</manifest>

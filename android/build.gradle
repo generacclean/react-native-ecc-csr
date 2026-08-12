@@ -35,6 +35,18 @@ android {
         // Required because CSRModule.java reads BuildConfig.DEBUG to gate verbose logging.
         buildConfig true
     }
+
+    testOptions {
+        unitTests {
+            // Robolectric needs the merged manifest and compiled resources on the unit-test
+            // classpath. Without this it finds no manifest, falls back to "legacy resources mode",
+            // and that mode is unsupported after API 28 - so it silently ran every Robolectric test
+            // against its API 16 floor, nine levels below this module's minSdk of 23. Any platform
+            // API added after 16 then failed at runtime with NoSuchMethodError despite compiling
+            // cleanly against compileSdk 36.
+            includeAndroidResources = true
+        }
+    }
 }
 
 repositories {

@@ -61,13 +61,14 @@ public class CSRModule extends ReactContextBaseJavaModule {
     private static final String ANDROID_KEYSTORE = "AndroidKeyStore";
 
     private static final String SOFTWARE_KEYSTORE_FILE = "software_keys.p12";
+    private static final String TEMP_SUFFIX = ".tmp";
 
     /**
-     * Subdirectory for quarantined corrupt keystore files. Android's backup exclusion API
-     * (both backup_rules.xml and data_extraction_rules.xml) only supports exact file/directory
-     * matches, not glob patterns, so a timestamped ".corrupted.<timestamp>" filename can't be
-     * excluded directly. Quarantining into a fixed-name subdirectory lets one exclusion entry
-     * cover all quarantined files regardless of timestamp.
+     * Subdirectory for quarantined corrupt keystore files. Keeps timestamped
+     * ".corrupted.<timestamp>" copies grouped in one place instead of scattered alongside the live
+     * keystore. It lives inside the no-backup directory (see {@link #getKeystoreDir()}), so
+     * quarantined copies of the private key are excluded from backups on the same terms as the
+     * live keystore.
      */
     private static final String CORRUPTED_KEYSTORE_DIR = "keystore_forensics";
 
@@ -77,7 +78,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * SECURITY RATIONALE (for code reviewers):
      *
      * 1. **Defense in depth through OS-level protection:**
-     *    - File stored in app-private directory (/data/data/com.app/files/)
+     *    - File stored in app-private no-backup directory (/data/data/com.app/no_backup/)
      *    - Android enforces per-app sandboxing - no other apps can read this
      *    - File permissions: 0600 (owner read/write only)
      *    - Root/physical access required to extract (same as any app data)
@@ -97,7 +98,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * 4. **Empty password does NOT weaken security model:**
      *    - THREAT: Malicious app reading our keystore → OS prevents via sandboxing
      *    - THREAT: Device theft with root access → Android Keystore (hardware) is the defense
-     *    - THREAT: Backup extraction → Android excludes app-private files from backups
+     *    - THREAT: Backup extraction → key lives in getNoBackupFilesDir(), which Android never backs up
      *    - Password would only help if file was world-readable (it's not)
      *
      * 5. **Industry precedent:**
@@ -141,6 +142,99 @@ public class CSRModule extends ReactContextBaseJavaModule {
     private static final Object SOFTWARE_KEYSTORE_LOCK = new Object();
 
     /**
+     * Directory holding the software keystore: {@link android.content.Context#getNoBackupFilesDir()},
+     * not {@code getFilesDir()}.
+     *
+     * Android never includes the no-backup directory in Auto Backup, cloud backup, or device
+     * transfer, and that is true regardless of what the consuming app puts in its manifest. This
+     * matters because android:fullBackupContent and android:dataExtractionRules each accept exactly
+     * one resource reference and nothing merges them, so a library cannot reliably contribute
+     * backup exclusions - whichever library or app sets the attribute wins and everyone else's
+     * rules are silently inactive. Storing the private key outside the backup set removes that
+     * coordination problem instead of documenting around it.
+     *
+     * Side effect: migrates any pre-existing keystore out of the legacy backup-eligible location.
+     */
+    File getKeystoreDir() {
+        File noBackupDir = getReactApplicationContext().getNoBackupFilesDir();
+        migrateLegacyKeystoreIfNeeded(noBackupDir);
+        return noBackupDir;
+    }
+
+    /**
+     * Move the keystore, any stale temp file, and any quarantined copies out of getFilesDir().
+     *
+     * Installs created before this change hold the key at files/software_keys.p12, which IS
+     * backup-eligible whenever the consuming app allows backups and does not exclude the file
+     * domain. Leaving it there would keep that exposure alive for every existing install, so the
+     * legacy copy is not merely ignored - it is relocated, or deleted when the new location is
+     * already populated and the legacy file is therefore stale.
+     *
+     * Deliberately not cached behind a flag: the check is a single stat, and running it on every
+     * lookup means a partially-completed migration self-heals on the next call.
+     */
+    private void migrateLegacyKeystoreIfNeeded(File noBackupDir) {
+        File legacyDir = getReactApplicationContext().getFilesDir();
+        if (legacyDir == null || noBackupDir == null || legacyDir.equals(noBackupDir)) {
+            return;
+        }
+
+        synchronized (SOFTWARE_KEYSTORE_LOCK) {
+            moveOutOfBackupEligibleStorage(
+                    new File(legacyDir, SOFTWARE_KEYSTORE_FILE),
+                    new File(noBackupDir, SOFTWARE_KEYSTORE_FILE));
+
+            // A leftover .tmp is a complete copy of the keystore, so it is just as sensitive.
+            File legacyTemp = new File(legacyDir, SOFTWARE_KEYSTORE_FILE + TEMP_SUFFIX);
+            if (legacyTemp.exists() && !legacyTemp.delete()) {
+                Log.w(MODULE_NAME, "Failed to delete legacy temp keystore from backup-eligible storage");
+            }
+
+            File legacyForensicsDir = new File(legacyDir, CORRUPTED_KEYSTORE_DIR);
+            File[] quarantined = legacyForensicsDir.listFiles();
+            if (quarantined == null) {
+                return;
+            }
+            File forensicsDir = new File(noBackupDir, CORRUPTED_KEYSTORE_DIR);
+            if (!forensicsDir.isDirectory() && !forensicsDir.mkdirs()) {
+                Log.w(MODULE_NAME, "Failed to create no-backup forensics directory during migration");
+                return;
+            }
+            for (File file : quarantined) {
+                moveOutOfBackupEligibleStorage(file, new File(forensicsDir, file.getName()));
+            }
+            if (!legacyForensicsDir.delete()) {
+                Log.w(MODULE_NAME, "Legacy forensics directory not empty after migration");
+            }
+        }
+    }
+
+    /**
+     * Relocate one file into no-backup storage.
+     *
+     * If the destination already exists, the source is a stale leftover and gets deleted - keeping
+     * it would leave a copy of the private key in the backup set for no benefit. If the rename
+     * fails, the source is left in place: an unreadable keystore is a worse outcome than a
+     * backup-eligible one, and the next call retries.
+     */
+    private void moveOutOfBackupEligibleStorage(File source, File destination) {
+        if (!source.exists()) {
+            return;
+        }
+        if (destination.exists()) {
+            if (!source.delete()) {
+                Log.w(MODULE_NAME, "Failed to delete superseded legacy file: " + source.getName());
+            }
+            return;
+        }
+        if (source.renameTo(destination)) {
+            Log.i(MODULE_NAME, "Migrated " + source.getName() + " to no-backup storage");
+        } else {
+            Log.w(MODULE_NAME, "Failed to migrate " + source.getName() + " to no-backup storage");
+        }
+    }
+
+    /**
      * Get File object for software keystore (plain file, no encryption).
      * Replaces EncryptedFile approach which had Tink keyset synchronization issues.
      *
@@ -148,7 +242,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * idempotent and cheap, so callers don't need to treat this as a pure path lookup.
      */
     File getKeystoreFile() {
-        File file = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+        File file = new File(getKeystoreDir(), SOFTWARE_KEYSTORE_FILE);
         // Set secure permissions if file exists
         if (file.exists()) {
             setSecureFilePermissions(file);
@@ -235,7 +329,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
      */
     private void saveSoftwareKeyStore(KeyStore keyStore) throws Exception {
         File keystoreFile = getKeystoreFile();
-        File tempFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE + ".tmp");
+        // Same directory as the target so the rename below stays within one filesystem (and so the
+        // temp copy is never written to backup-eligible storage).
+        File tempFile = new File(keystoreFile.getParentFile(), SOFTWARE_KEYSTORE_FILE + TEMP_SUFFIX);
 
         // Delete temp file if it exists from previous failed write
         if (tempFile.exists() && !tempFile.delete()) {

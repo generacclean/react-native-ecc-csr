@@ -8,17 +8,15 @@ A React Native module for generating Certificate Signing Requests (CSR) with Ell
 
 ### Software Keystore Security (useHardwareKey=false)
 
-**Storage:** Software-backed keys are stored in a password-protected PKCS12 file in the app's private directory. The file is protected by Android OS-level security (file permissions 0600, app sandboxing) but **not encrypted at rest**.
+**Storage:** Software-backed keys are stored in a PKCS12 file in the app's private no-backup directory (`Context.getNoBackupFilesDir()`, i.e. `/data/data/<your.package>/no_backup/software_keys.p12`). The file is protected by Android OS-level security (file permissions 0600, app sandboxing) but **not encrypted at rest**.
 
-**Backup Exclusion:** The keystore file is automatically excluded from device backups (see `backup_rules.xml`). However, **you must ensure your app properly configures backup settings** in `AndroidManifest.xml`:
+**Backup Exclusion:** No configuration required. Android never includes `getNoBackupFilesDir()` in Auto Backup, cloud backup, or device-to-device transfer, so the private key cannot leave the device through backup infrastructure no matter what your app sets for `android:allowBackup`, `android:fullBackupContent`, or `android:dataExtractionRules`.
 
-```xml
-<application
-    android:allowBackup="false">
-    <!-- OR for selective backup: -->
-    android:fullBackupContent="@xml/backup_rules">
-</application>
-```
+Earlier versions shipped `backup_rules.xml` and `data_extraction_rules.xml` for the consuming app to reference from its manifest. Those files have been **removed** — the approach could not be made reliable, because `android:fullBackupContent` and `android:dataExtractionRules` each accept exactly one resource reference and nothing merges them. Any other library that claimed either attribute (`expo-secure-store`, for example) silently deactivated this module's exclusions. If your manifest or config plugin still references `@xml/backup_rules` or `@xml/data_extraction_rules` from this package, remove those references; nothing else is needed in their place.
+
+Keys created with `useHardwareKey=true` live in the Android Keystore and are non-exportable, so they were never backup-eligible.
+
+**Migration:** installs created before this change hold the keystore at `files/software_keys.p12`. The module moves it (plus any quarantined corrupt copies) into `no_backup/` on first keystore access and deletes the backup-eligible original, so no action is needed from the app. If your app persists the `keystorePath` returned by `generateCSR`, re-read it rather than trusting a cached value across the upgrade — the directory changes.
 
 **Security Recommendations:**
 - ✅ **Production apps:** Use `useHardwareKey=true` on Android 12+ devices whenever possible
@@ -358,6 +356,13 @@ cd android && ./gradlew test
 
 See `android/src/test/README.md` for what is and isn't covered.
 
+Robolectric tests run against API 33, pinned in `android/src/test/resources/robolectric.properties`
+and backed by `testOptions.unitTests.includeAndroidResources`. Both are required: without the merged
+manifest, Robolectric falls back to legacy resources mode, which is unsupported after API 28 and
+silently drops every Robolectric test down to its API 16 floor — nine levels below this module's
+`minSdk 23`. Platform APIs newer than 16 then fail at runtime with `NoSuchMethodError` despite
+compiling cleanly. Tests that need a specific level still override `Build.VERSION.SDK_INT` locally.
+
 **iOS has no automated test coverage.** `ios/CSRModule.m` carries the other half of this
 module and is verified manually only, so a CSR-format regression on iOS would not be caught
 by CI. Exercise iOS changes against a real device or simulator before release.
@@ -410,12 +415,12 @@ Understanding the security implications of different key storage methods is impo
 - **Not encrypted at rest** - relies on OS-level security only
 - File permissions explicitly set to mode 0600 (owner read/write only)
 - Protected by Android app sandboxing (other apps cannot access)
-- Automatically excluded from device backups (via `backup_rules.xml`)
+- Excluded from device backups unconditionally (stored in `getNoBackupFilesDir()`, no manifest configuration required)
 - Automatically deleted when app is uninstalled
 
 **Security Level**:
-- ✅ **Protected from**: Other apps (sandboxing), normal users, device backups (if configured)
-- ⚠️ **Vulnerable to**: Root access, physical access with USB debugging enabled, device backups if misconfigured
+- ✅ **Protected from**: Other apps (sandboxing), normal users, device backups and device-to-device transfer
+- ⚠️ **Vulnerable to**: Root access, physical access with USB debugging enabled
 - ⚠️ **No encryption at rest**: Keys stored in plain PKCS12 format
 
 **Recommended For**:
@@ -472,68 +477,20 @@ Understanding the security implications of different key storage methods is impo
    await CSRModule.deleteKey("old-key-alias");
    ```
 
-4. **Handle Device Backups** ⚠️ **CRITICAL - MUST CONFIGURE IN YOUR APP**
-   
-   The module provides `backup_rules.xml` and `data_extraction_rules.xml`, but **these files do NOT automatically protect your app** unless you wire them into your app's manifest.
-   
-   **For Native Android Apps (AndroidManifest.xml):**
-   ```xml
-   <application
-       android:allowBackup="true"
-       android:fullBackupContent="@xml/backup_rules"
-       android:dataExtractionRules="@xml/data_extraction_rules">
-       <!-- OR for maximum security: -->
-       android:allowBackup="false">
-   </application>
-   ```
-   
-   **For Expo/React Native Apps (app.json or app.config.js):**
-   
-   You **MUST** create a config plugin to merge the backup exclusion rules:
-   
-   ```javascript
-   // app.config.js or plugins/android-backup-exclusion.js
-   const { withAndroidManifest } = require('@expo/config-plugins');
-   
-   module.exports = function withBackupExclusion(config) {
-     return withAndroidManifest(config, async (config) => {
-       const androidManifest = config.modResults.manifest;
-       const application = androidManifest.application[0];
-       
-       // Reference the backup rules from the library
-       application.$['android:fullBackupContent'] = '@xml/backup_rules';
-       application.$['android:dataExtractionRules'] = '@xml/data_extraction_rules';
-       
-       return config;
-     });
-   };
-   
-   // Then in app.config.js:
-   module.exports = {
-     expo: {
-       plugins: [
-         './plugins/android-backup-exclusion'
-       ]
-     }
-   };
-   ```
-   
-   **Why This Matters:**
-   - Without manifest configuration, the library's backup rules are **NOT applied**
-   - Your software keystore **WILL be uploaded to Google Drive** and device-to-device transfer
-   - This exposes encrypted keys to cloud storage and backup infrastructure
-   - Android 12+ requires `data_extraction_rules.xml` (the old `backup_rules.xml` is ignored)
-   
-   **What the module excludes:**
-   - `software_keys.p12` (legacy filename)
-   - `software_keys.p12.tmp` (temporary write file)
-   - Any files matching the keystore pattern
-   
+4. **Handle Device Backups** — no configuration required
+
+   The software keystore is stored in `Context.getNoBackupFilesDir()`. Android excludes that directory from Auto Backup, cloud backup, and device-to-device transfer unconditionally, so nothing needs to be added to your manifest or Expo config, and no `android:allowBackup` value can override it.
+
+   **If you are upgrading from a version that shipped `backup_rules.xml`:** delete any manifest attribute or config plugin that references `@xml/backup_rules` or `@xml/data_extraction_rules` from this package. Both files have been removed, so a stale reference will fail resource resolution at build time. Do not replace them with anything.
+
+   Those files were removed because the mechanism could not be made to work from inside a library: `android:fullBackupContent` and `android:dataExtractionRules` each accept exactly one resource reference, and nothing merges rule sets across libraries. If any other dependency claimed either attribute — `expo-secure-store` does, via its own config plugin — this module's exclusions were silently inactive, with no build error and no runtime warning. Storing the key outside the backup set removes the coordination problem instead of documenting around it.
+
+   **Migration for existing installs:** the keystore moves from `files/software_keys.p12` to `no_backup/software_keys.p12` on first keystore access, along with any quarantined corrupt copies. The backup-eligible original is deleted, not merely abandoned. If your app caches the `keystorePath` from a previous `generateCSR` call, re-read it after upgrading.
+
    **Verification:**
    ```bash
-   # Check if backup rules are applied in your built APK
-   apktool d app-release.apk
-   grep -r "backup_rules\|data_extraction_rules" app-release/AndroidManifest.xml
+   adb shell run-as <your.package> ls -l no_backup/    # keystore should be here
+   adb shell run-as <your.package> ls -l files/        # and absent here
    ```
 
 5. **Monitor Key Storage Type**
@@ -554,7 +511,7 @@ Understanding the security implications of different key storage methods is impo
 |--------|---------------|---------------|
 | **Encryption at Rest** | ❌ No encryption (OS-level protection only) | ✅ Hardware-encrypted |
 | **Root Protection** | ❌ Vulnerable to root access | ✅ Fully protected |
-| **Backup Exposure** | ✅ Excluded (if configured) | ✅ Cannot be backed up |
+| **Backup Exposure** | ✅ Excluded (stored in `no_backup/`) | ✅ Cannot be backed up |
 | **Device Compatibility** | ✅ All devices (API 23+) | ⚠️ Android 12+ for TLS |
 | **Performance** | ⚠️ Slower (software crypto) | ✅ Faster (hardware acceleration) |
 | **Survives Reinstall** | ❌ Deleted with app | ✅ Persists (manual delete required) |

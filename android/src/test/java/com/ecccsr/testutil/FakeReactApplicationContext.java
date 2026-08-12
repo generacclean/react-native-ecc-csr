@@ -13,9 +13,9 @@ import com.facebook.react.turbomodule.core.interfaces.CallInvokerHolder;
 import java.util.Collections;
 
 /**
- * Minimal ReactApplicationContext for unit tests. Delegates Context methods (getFilesDir,
- * getPackageManager, etc.) to the real Robolectric application context via ContextWrapper, and
- * stubs the bridge-only abstract methods that CSRModule never calls.
+ * Minimal ReactApplicationContext for unit tests. Delegates Context methods (getNoBackupFilesDir,
+ * getFilesDir, getPackageManager, etc.) to the real Robolectric application context via
+ * ContextWrapper, and stubs the bridge-only abstract methods that CSRModule never calls.
  */
 public class FakeReactApplicationContext extends ReactApplicationContext {
 
