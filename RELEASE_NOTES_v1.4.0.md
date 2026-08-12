@@ -1,7 +1,7 @@
 # Release Notes v1.4.0
 
 **Release Date:** August 12, 2026
-**Branch:** fix/issue-17-followups-18-19-20-21
+**Ships with:** react-native-mqtt-mtls 1.4.0+ (required — see Upgrade Checklist)
 
 ---
 
@@ -98,9 +98,12 @@ build, downgraded to a pre-migration build, and re-enrolled wrote a **newer** ke
 The newer file now wins on modification time, and the copy it supersedes is quarantined as
 `no_backup/keystore_forensics/software_keys.p12.superseded.<timestamp>` rather than deleted — it is
 a complete private key, and if the mtime comparison is ever wrong a forensic copy is recoverable
-where a deletion is not. A tie keeps the no-backup copy. If the quarantine cannot be performed,
-migration fails instead of deleting the newer key. Only reachable on sideload/enterprise/dev
-channels; the Play Store refuses to install a lower version.
+where a deletion is not. **Equal modification times quarantine as well**, because the two files on
+this path are written within the same second and a filesystem that reports mtime at one- or
+two-second resolution cannot rank them; treating a tie as "the no-backup copy wins" would delete the
+newer key and reactivate the older one. Keeping both is the only answer the filesystem supports. If
+the quarantine cannot be performed, migration fails instead of deleting either key. Only reachable
+on sideload/enterprise/dev channels; the Play Store refuses to install a lower version.
 
 ### `deleteKey` reports partial success
 
@@ -130,7 +133,7 @@ one.
 
 ## 🧪 Testing
 
-70 JVM unit tests (Robolectric, API 33), no emulator required:
+71 JVM unit tests (Robolectric, API 33), no emulator required:
 
 - `keyExists`, `getPublicKey`, `deleteKey` and `generateCSR` each asserted separately for the
   reject-not-resolve behaviour — each has its own broad `catch` that the location failure has to
@@ -139,6 +142,9 @@ one.
   `keystore_forensics/` layouts
 - Migration failure leaves the only copy of the key intact for the next attempt
 - Newer-legacy-keystore-wins, and quarantine-failure-aborts-migration
+- Equal modification times keep both keys, staged as an exact tie rather than the minute-apart
+  stamps the other downgrade tests use — otherwise the suite only covers filesystems whose mtime
+  resolution can rank the two files in the first place
 
 Storage failures are injected by pointing the module at a directory whose parent is a regular file,
 so every write beneath it fails for any user including root. `File.setWritable(false)` was
@@ -164,6 +170,14 @@ the failure path on a containerised CI runner. See `android/src/test/README.md`.
 3. Handle rejections from `keyExists` / `deleteKey` as "unknown, retry" rather than "no key"
 4. Verify on device: `adb shell run-as <your.package> ls -l no_backup/` shows the keystore, and
    `ls -l files/` shows no `software_keys.p12*`
+5. **Upgrade `react-native-mqtt-mtls` to 1.4.0 or later in the same release.** This version returns
+   an absolute `no_backup/` keystore path, and mtls 1.3.x accepts absolute paths only inside
+   `getFilesDir()` — `no_backup/` is a sibling of `files/`, not a child, so the pair ecc-csr 1.4.0 +
+   mtls ≤1.3.x rejects the path with `Keystore path must be inside app-private storage` and every
+   mTLS connection fails. A consumer that passes no `keystorePath` at all fares no better: mtls 1.3.x
+   defaults to `files/software_keys.p12`, which this release migrates away. mtls 1.4.0 accepts both
+   roots, so if the two land in separate releases, ship mtls first. Nothing enforces the pairing at
+   the package-manager level — `package.json` here declares only `react-native` as a peer dependency.
 
 ---
 
@@ -176,7 +190,11 @@ the failure path on a containerised CI runner. See `android/src/test/README.md`.
   RATIONALE comment on `KEYSTORE_PASSWORD` in `CSRModule.java` for why application-layer encryption
   (`EncryptedFile` + Tink, v1.2.0) was removed
 - The downgrade-then-upgrade path picks a winner by modification time, which is an inference, not a
-  proof; that is why the loser is quarantined rather than deleted
+  proof; that is why the loser is quarantined rather than deleted. The inference cannot be repaired:
+  the no-backup keystore carries no embedded timestamp, so the filename-based recency scheme used for
+  quarantined copies does not transfer, and on a coarse-resolution filesystem the two stamps can be
+  equal. A tie is therefore treated as unrankable and both copies are kept — one live, one forensic —
+  rather than resolved in either direction
 
 ---
 

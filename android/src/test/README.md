@@ -99,7 +99,10 @@ in this JVM-only test environment):
 - Downgrade then upgrade: a legacy keystore *newer* than the no-backup one wins the migration
   rather than being deleted as stale, and the copy it supersedes is quarantined as
   `.superseded.*`. If that quarantine cannot be performed, the migration fails instead of
-  deleting the newer key.
+  deleting the newer key. Identical modification times are covered separately: the downgrade
+  tests put the stamps a minute apart, which only exercises the case where the filesystem's
+  mtime resolution can rank the two files at all, so a third test stages an exact tie — the
+  pair a one- or two-second-resolution filesystem would report — and asserts both keys survive.
 - Corruption handling: corrupt keystore quarantine and `.corrupted` retention cap
 - Input validation (IP address, curve, alias) against the real production methods
 - Hardware capability detection across SDK versions

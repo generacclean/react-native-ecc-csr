@@ -50,6 +50,9 @@ public class CSRModuleTest {
     /** Real but separate no-backup directory, used to make one operation fail in isolation. */
     private static final String ALT_NO_BACKUP_DIR = "alt-no-backup";
 
+    /** Alias of the key written by the post-downgrade re-enrolment in the migration tests. */
+    private static final String ROLLED_BACK_ALIAS = "downgrade-reenrolled-alias";
+
     private CSRModule module;
     private FakeReactApplicationContext context;
     private final int originalSdkInt = android.os.Build.VERSION.SDK_INT;
@@ -316,8 +319,7 @@ public class CSRModuleTest {
         // Staging cannot go through two generateCSR calls: the second one would migrate the first
         // keystore back out of getFilesDir() before writing, so the two copies would never coexist.
         // Produce each keystore with production code, then place them by hand.
-        String rolledBackAlias = "downgrade-reenrolled-alias";
-        module.generateCSRInternal(paramsFor(rolledBackAlias, "secp256r1"));
+        module.generateCSRInternal(paramsFor(ROLLED_BACK_ALIAS, "secp256r1"));
         File current = new File(context.getNoBackupFilesDir(), KEYSTORE_NAME);
         byte[] reenrolledKeystore = java.nio.file.Files.readAllBytes(current.toPath());
         assertTrue(current.delete());
@@ -330,7 +332,7 @@ public class CSRModuleTest {
         assertTrue(current.setLastModified(legacy.lastModified() - 60_000L));
 
         RecordingPromise promise = new RecordingPromise();
-        module.keyExists(rolledBackAlias, promise);
+        module.keyExists(ROLLED_BACK_ALIAS, promise);
 
         assertEquals("the newer legacy keystore must win, not be deleted as stale",
                 Boolean.TRUE, promise.resolvedValue);
@@ -344,12 +346,49 @@ public class CSRModuleTest {
     }
 
     @Test
+    public void testEqualModificationTimesKeepBothKeysInsteadOfDeletingTheLegacyOne()
+            throws Exception {
+        // The two downgrade tests above put the stamps a minute apart, which only proves the
+        // comparison works when the filesystem's mtime resolution is fine enough to rank the files.
+        // On a filesystem that reports modification times at one- or two-second resolution - the same
+        // hazard cleanupQuarantinedFiles() reads recency from the filename to avoid - the pair that
+        // the downgrade path produces lands on identical stamps, because generateCSR() writes
+        // getFilesDir()/software_keys.p12 moments after the no-backup copy was last touched. A tie
+        // that fell through to moveOutOfBackupEligibleStorage() would delete the legacy file as
+        // stale, which on this path is the *newer* private key.
+        module.generateCSRInternal(paramsFor(ROLLED_BACK_ALIAS, "secp256r1"));
+        File current = new File(context.getNoBackupFilesDir(), KEYSTORE_NAME);
+        byte[] reenrolledKeystore = java.nio.file.Files.readAllBytes(current.toPath());
+        assertTrue(current.delete());
+
+        module.generateCSRInternal(paramsFor("pre-downgrade-alias", "secp256r1"));
+        File legacy = new File(context.getFilesDir(), KEYSTORE_NAME);
+        java.nio.file.Files.write(legacy.toPath(), reenrolledKeystore);
+        assertTrue("staging requires both copies to exist", current.exists() && legacy.exists());
+        // Both stamps identical: the tie a coarse-resolution filesystem would report.
+        assertTrue(current.setLastModified(legacy.lastModified()));
+        assertEquals("staging requires the stamps to be indistinguishable",
+                legacy.lastModified(), current.lastModified());
+
+        RecordingPromise promise = new RecordingPromise();
+        module.keyExists(ROLLED_BACK_ALIAS, promise);
+
+        // A tie is unresolvable from the filesystem, so neither key may be discarded: the legacy copy
+        // becomes live and the no-backup copy is kept for forensics.
+        assertEquals("an unrankable legacy keystore must not be deleted as stale",
+                Boolean.TRUE, promise.resolvedValue);
+        assertFalse("the legacy copy must not stay in backup-eligible storage", legacy.exists());
+        assertEquals("the tied no-backup copy should be quarantined, not deleted",
+                1, quarantinedNames(current, SUPERSEDED_INFIX).size());
+    }
+
+    @Test
     public void testSupersededKeystoreThatCannotBeQuarantinedFailsInsteadOfDeletingTheNewerKey()
             throws Exception {
         // Same downgrade staging as above, but with the quarantine destination unusable. Returning
         // normally here would drop straight into the "destination exists, so the source is stale"
         // branch and delete the newer key.
-        module.generateCSRInternal(paramsFor("downgrade-reenrolled-alias", "secp256r1"));
+        module.generateCSRInternal(paramsFor(ROLLED_BACK_ALIAS, "secp256r1"));
         File legacy = new File(context.getFilesDir(), KEYSTORE_NAME);
         assertTrue(new File(context.getNoBackupFilesDir(), KEYSTORE_NAME).renameTo(legacy));
 

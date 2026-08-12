@@ -269,7 +269,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
     }
 
     /**
-     * Step aside for a legacy keystore that is newer than the no-backup one.
+     * Step aside for a legacy keystore that is not older than the no-backup one.
      *
      * {@link #moveOutOfBackupEligibleStorage} reads a populated destination as proof the legacy file
      * is a stale leftover, which is true for a straight upgrade: the migration renames the file, so
@@ -282,8 +282,22 @@ public class CSRModule extends ReactContextBaseJavaModule {
      *
      * The loser is quarantined rather than deleted. It is a complete private key, and the comparison
      * that picked a winner is a modification time; if that inference is ever wrong, a forensic copy
-     * in no-backup storage is recoverable and a deletion is not. A tie keeps the no-backup copy,
-     * which is the straight-upgrade behaviour.
+     * in no-backup storage is recoverable and a deletion is not.
+     *
+     * A tie is treated as "the legacy copy may be newer", not as "the no-backup copy wins", which is
+     * why the comparison is strictly less-than. {@link #cleanupQuarantinedFiles} documents why
+     * lastModified() cannot rank two files on a filesystem that reports modification times at one-
+     * or two-second resolution, and both files here are produced within the same second on the path
+     * that produces them: a single generateCSR() call writes getFilesDir()/software_keys.p12 moments
+     * after the no-backup copy was last touched. Equal stamps under a {@code <=} test would return
+     * early, and {@link #moveOutOfBackupEligibleStorage} would then read the populated destination as
+     * proof the legacy file is stale and delete it - deleting the newer key and reactivating the
+     * older one. Quarantining on a tie keeps both: the legacy copy becomes live and the no-backup one
+     * is preserved for forensics. The tie is not resolvable from the filesystem - the no-backup copy
+     * carries no embedded timestamp, so the filename-based recency trick that
+     * {@link #cleanupQuarantinedFiles} uses does not transfer - so the safe answer is to keep both
+     * copies. Cost is one extra forensic copy in the (unreachable-by-rename) case where both files
+     * legitimately share a stamp, and the retention cap already bounds those at three.
      *
      * @throws IOException if the older copy cannot be quarantined. Returning normally would hand the
      *         caller straight back to {@link #moveOutOfBackupEligibleStorage}, which would then
@@ -293,27 +307,30 @@ public class CSRModule extends ReactContextBaseJavaModule {
     private void quarantineSupersededKeystore(File legacyKeystore, File currentKeystore, File noBackupDir)
             throws IOException {
         if (!legacyKeystore.exists() || !currentKeystore.exists()
-                || legacyKeystore.lastModified() <= currentKeystore.lastModified()) {
+                || legacyKeystore.lastModified() < currentKeystore.lastModified()) {
             return;
         }
 
         File forensicsDir = new File(noBackupDir, CORRUPTED_KEYSTORE_DIR);
         if (!forensicsDir.isDirectory() && !forensicsDir.mkdirs()) {
             throw new KeystoreLocationException(
-                    "A newer software keystore exists in backup-eligible storage but the superseded "
-                            + "no-backup copy cannot be quarantined: forensics directory unavailable");
+                    "A software keystore in backup-eligible storage is not older than the no-backup "
+                            + "copy but the superseded no-backup copy cannot be quarantined: "
+                            + "forensics directory unavailable");
         }
 
         File superseded = new File(
                 forensicsDir, SOFTWARE_KEYSTORE_FILE + SUPERSEDED_INFIX + quarantineTimestamp());
         if (!currentKeystore.renameTo(superseded)) {
             throw new KeystoreLocationException(
-                    "A newer software keystore exists in backup-eligible storage but the superseded "
-                            + "no-backup copy could not be quarantined: " + currentKeystore.getAbsolutePath());
+                    "A software keystore in backup-eligible storage is not older than the no-backup "
+                            + "copy but the superseded no-backup copy could not be quarantined: "
+                            + currentKeystore.getAbsolutePath());
         }
 
-        Log.w(MODULE_NAME, "Legacy software keystore is newer than the no-backup copy (downgrade "
-                + "then upgrade); quarantined the superseded copy as " + superseded.getName());
+        Log.w(MODULE_NAME, "Legacy software keystore is not older than the no-backup copy (downgrade "
+                + "then upgrade, or an unrankable tie); quarantined the superseded copy as "
+                + superseded.getName());
         cleanupQuarantinedFiles(forensicsDir, SOFTWARE_KEYSTORE_FILE, SUPERSEDED_INFIX);
     }
 
