@@ -21,6 +21,7 @@ import java.util.Collections;
 public class FakeReactApplicationContext extends ReactApplicationContext {
 
     private boolean noBackupFilesDirUnavailable = false;
+    private File noBackupFilesDirOverride = null;
 
     public FakeReactApplicationContext(Context base) {
         super(base);
@@ -35,9 +36,26 @@ public class FakeReactApplicationContext extends ReactApplicationContext {
         this.noBackupFilesDirUnavailable = unavailable;
     }
 
+    /**
+     * Point the module at a different no-backup directory.
+     *
+     * Exists so a test can make writes into that directory fail deterministically - pass a path
+     * whose parent is a regular file and every create/rename under it fails on any filesystem and
+     * for any user, including root. The alternative, chmod-ing the real directory, is a silent no-op
+     * as root and therefore skips rather than asserts on containerised CI runners.
+     *
+     * Pass null to restore the real directory.
+     */
+    public void setNoBackupFilesDirOverride(File override) {
+        this.noBackupFilesDirOverride = override;
+    }
+
     @Override
     public File getNoBackupFilesDir() {
-        return noBackupFilesDirUnavailable ? null : super.getNoBackupFilesDir();
+        if (noBackupFilesDirUnavailable) {
+            return null;
+        }
+        return noBackupFilesDirOverride != null ? noBackupFilesDirOverride : super.getNoBackupFilesDir();
     }
 
     @Override

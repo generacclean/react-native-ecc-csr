@@ -122,6 +122,9 @@ if (result.hardwareKeyRequested && !result.useHardwareKey) {
 
 ### Response Fields
 
+`src/index.ts` is the source of truth for these types; the block below is a commented copy of
+`CSRResult` for readers browsing the docs.
+
 ```typescript
 interface CSRResult {
   csr: string;                    // PEM-encoded CSR
@@ -134,7 +137,8 @@ interface CSRResult {
   keystore?: {                    // Android only. Present when useHardwareKey is false.
                                    // Always absent on iOS (keys live in the Keychain, not a file).
     path: string;                 // Absolute path to the PKCS12 keystore file
-    password?: string;            // Optional; today always "" (see CSRKeystoreDescriptor)
+    password?: string;            // Always sent, always ""; optional only for forward
+                                   // compatibility (see CSRKeystoreDescriptor in src/index.ts)
     format: 'pkcs12';
   };
 }
@@ -165,23 +169,8 @@ Generates a Certificate Signing Request with the specified parameters.
 
 #### Returns
 
-```typescript
-{
-  csr: string;                    // PEM-encoded CSR
-  privateKeyAlias: string;        // Key alias
-  publicKey: string;              // Base64-encoded public key
-  isHardwareBacked: boolean;      // True if key is in hardware keystore
-  useHardwareKey: boolean;        // Final decision (software or hardware)
-  hardwareKeyRequested: boolean;  // What the app requested
-  tlsCompatible: boolean;         // Device supports hardware keys for TLS
-  keystore?: {                    // Android only. Present when useHardwareKey is false.
-                                   // Always absent on iOS (keys live in the Keychain, not a file).
-    path: string;                 // Absolute path to the PKCS12 keystore file
-    password?: string;            // Optional; today always "" (see CSRKeystoreDescriptor)
-    format: 'pkcs12';
-  };
-}
-```
+`Promise<CSRResult>` — see [Response Fields](#response-fields) above for the field-by-field
+breakdown.
 
 ### `getHardwareKeystoreCapabilities(): Promise<HardwareKeystoreCapabilities>`
 

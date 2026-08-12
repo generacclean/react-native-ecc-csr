@@ -12,7 +12,9 @@ android/src/test/java/com/ecccsr/
 ├── CSRModuleTest.java             - Tests CSRModule directly: CSR generation, key lifecycle,
 │                                    keystore round-trip, corruption recovery, capabilities
 └── testutil/
-    ├── FakeReactApplicationContext.java - Minimal ReactApplicationContext for Robolectric tests
+    ├── FakeReactApplicationContext.java - Minimal ReactApplicationContext for Robolectric tests,
+    │                                      with hooks to make no-backup storage unavailable or
+    │                                      unwritable (see "Simulating storage failures")
     └── RecordingPromise.java            - Captures resolve/reject calls for assertions
 ```
 
@@ -34,7 +36,15 @@ cd android
 # Generate HTML report
 ./gradlew test
 # Report will be at: android/build/reports/tests/test/index.html
+
+# Force execution when Gradle considers the task up to date
+./gradlew test --rerun-tasks
 ```
+
+`./gradlew test` prints `BUILD SUCCESSFUL` without running anything when Gradle judges the task
+up to date, which is easy to mistake for a passing run — especially when checking that a change
+actually breaks a test. Use `--rerun-tasks`, or read the counts out of
+`android/build/test-results/testDebugUnitTest/*.xml`.
 
 ### From Android Studio
 
@@ -81,11 +91,37 @@ in this JVM-only test environment):
 - Backup exclusion: the keystore lives in `getNoBackupFilesDir()`, and legacy copies in
   `getFilesDir()` (keystore, `.tmp`, and quarantined `.corrupted.*` files in both the flat
   and `keystore_forensics/` layouts) are relocated out of backup-eligible storage
-- Migration failure modes: an unavailable no-backup directory or a keystore that cannot be
-  relocated fails loudly instead of shadowing an existing key with an empty keystore
+- Migration failure modes: when the no-backup directory is unavailable or cannot be written to,
+  `keyExists`, `getPublicKey`, `deleteKey` and `generateCSR` all fail loudly instead of reporting
+  "no key" (which would shadow an existing key with an empty keystore and trigger a silent
+  re-enrolment). Each entry point is asserted separately, because each has its own broad `catch`
+  that the location failure has to escape.
+- Downgrade then upgrade: a legacy keystore *newer* than the no-backup one wins the migration
+  rather than being deleted as stale, and the copy it supersedes is quarantined as
+  `.superseded.*`. If that quarantine cannot be performed, the migration fails instead of
+  deleting the newer key.
 - Corruption handling: corrupt keystore quarantine and `.corrupted` retention cap
 - Input validation (IP address, curve, alias) against the real production methods
 - Hardware capability detection across SDK versions
+
+#### Simulating storage failures
+
+The two hooks on `FakeReactApplicationContext` are what make the no-backup storage tests
+assertions rather than skips:
+
+- `setNoBackupFilesDirUnavailable(true)` — `getNoBackupFilesDir()` returns null, the platform's
+  way of saying it has no such directory.
+- `setNoBackupFilesDirOverride(dir)` — points the module at another directory. Tests pass a path
+  whose parent is a **regular file**, so every create and rename underneath it fails on any
+  filesystem and for any user. Do not reach for `File.setWritable(false)` instead: it is a silent
+  no-op when the test runs as root, so a permission-based version of these tests passes (or
+  `assumeTrue`-skips) on containerised CI runners without ever exercising the failure path — and
+  the failure path is the headline behaviour of this change.
+
+Tests that assert a rejection assert on `CSRModule.KeystoreLocationException` specifically, not on
+`Exception`. Under Robolectric the hardware keystore is absent, so almost any hardware-path call
+throws *something*; only the exception type distinguishes "storage is broken, we stopped" from
+"this environment has no AndroidKeyStore".
 
 ## Dependencies
 
@@ -151,7 +187,10 @@ public class MyNewTest {
 
 1. **Use AAA Pattern**: Arrange, Act, Assert
 2. **One assertion per test** (when possible)
-3. **Descriptive test names**: `testMethodName_condition_expectedResult`
+3. **Descriptive test names**: `test` + camelCase describing condition and expected result, e.g.
+   `testNoBackupDirUnavailableMakesGetPublicKeyRejectInsteadOfReportingKeyNotFound`. No
+   underscores — SonarQube rule `java:S100` enforces `^[a-z][a-zA-Z0-9]*$` for method names, so
+   the `testMethod_condition_result` convention fails the quality gate.
 4. **Test edge cases**: null, empty, invalid inputs
 5. **Clean up**: Use `@Before` and `@After` for setup/teardown
 6. **Don't test Android SDK**: Focus on YOUR code logic

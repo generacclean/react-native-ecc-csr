@@ -27,7 +27,6 @@ import java.util.Collections;
 import java.util.List;
 
 import static org.junit.Assert.*;
-import static org.junit.Assume.assumeTrue;
 
 /**
  * Unit tests for CSRModule that exercise the real production code (via generateCSRInternal /
@@ -38,7 +37,18 @@ import static org.junit.Assume.assumeTrue;
 @RunWith(RobolectricTestRunner.class)
 public class CSRModuleTest {
 
-    private static final String KEYSTORE_NAME = "software_keys.p12";
+    // Read from production rather than copied, so a rename on either side breaks the build instead
+    // of quietly leaving these tests staging files at names production no longer uses.
+    private static final String KEYSTORE_NAME = CSRModule.SOFTWARE_KEYSTORE_FILE;
+    private static final String CORRUPTED_INFIX = CSRModule.CORRUPTED_INFIX;
+    private static final String SUPERSEDED_INFIX = CSRModule.SUPERSEDED_INFIX;
+    private static final String FORENSICS_DIR = "keystore_forensics";
+
+    /** Regular file that stands in for a directory, so anything created under it must fail. */
+    private static final String BLOCKED_PARENT = "blocked-no-backup-parent";
+
+    /** Real but separate no-backup directory, used to make one operation fail in isolation. */
+    private static final String ALT_NO_BACKUP_DIR = "alt-no-backup";
 
     private CSRModule module;
     private FakeReactApplicationContext context;
@@ -54,24 +64,35 @@ public class CSRModuleTest {
         // another test's artifacts. Start every test from a known-empty state, in both the live
         // no-backup location and the legacy backup-eligible one the migration tests populate.
         for (File dir : new File[] {context.getNoBackupFilesDir(), context.getFilesDir()}) {
-            new File(dir, KEYSTORE_NAME).delete();
-            new File(dir, KEYSTORE_NAME + ".tmp").delete();
-            File[] leftovers = new File(dir, "keystore_forensics").listFiles();
+            // One prefix covers the keystore, its .tmp, and both quarantine infixes - including the
+            // flat layout pre-subdirectory releases used, which the migration tests stage here.
+            File[] keystoreFiles = dir.listFiles((unused, name) -> name.startsWith(KEYSTORE_NAME));
+            if (keystoreFiles != null) {
+                for (File file : keystoreFiles) {
+                    file.delete();
+                }
+            }
+            File[] leftovers = new File(dir, FORENSICS_DIR).listFiles();
             if (leftovers != null) {
                 for (File leftover : leftovers) {
                     leftover.delete();
                 }
             }
-            // Pre-subdirectory releases quarantined corrupt keystores flat in the files dir, and
-            // the migration test below stages one there.
-            File[] flatQuarantined = dir.listFiles(
-                    (unused, name) -> name.startsWith(KEYSTORE_NAME + ".corrupted."));
-            if (flatQuarantined != null) {
-                for (File leftover : flatQuarantined) {
-                    leftover.delete();
-                }
+        }
+
+        // Scaffolding the failure-injection tests below leave behind, in the real no-backup dir.
+        new File(context.getNoBackupFilesDir(), BLOCKED_PARENT).delete();
+        deleteRecursively(new File(context.getNoBackupFilesDir(), ALT_NO_BACKUP_DIR));
+    }
+
+    private static void deleteRecursively(File file) {
+        File[] children = file.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                deleteRecursively(child);
             }
         }
+        file.delete();
     }
 
     @After
@@ -92,7 +113,7 @@ public class CSRModuleTest {
     // ---- CSR generation: valid, parseable CSR with the expected DN, per curve ----
 
     @Test
-    public void generateCSR_p256_producesParseableCSRWithExpectedDN() throws Exception {
+    public void testGenerateCSRForP256ProducesParseableCSRWithExpectedDN() throws Exception {
         JavaOnlyMap params = paramsFor("alias-p256", "secp256r1");
         params.putString("country", "US");
         params.putString("organization", "Generac Power Systems");
@@ -109,21 +130,21 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void generateCSR_p384_producesParseableCSR() throws Exception {
+    public void testGenerateCSRForP384ProducesParseableCSR() throws Exception {
         CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("alias-p384", "secp384r1"));
         PKCS10CertificationRequest csr = parseCSR(result.csr);
         assertTrue(csr.getSubject().toString().contains("CN=test-device"));
     }
 
     @Test
-    public void generateCSR_p521_producesParseableCSR() throws Exception {
+    public void testGenerateCSRForP521ProducesParseableCSR() throws Exception {
         CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("alias-p521", "secp521r1"));
         PKCS10CertificationRequest csr = parseCSR(result.csr);
         assertTrue(csr.getSubject().toString().contains("CN=test-device"));
     }
 
     @Test
-    public void generateCSR_signatureVerifiesAgainstPublicKey() throws Exception {
+    public void testGenerateCSRSignatureVerifiesAgainstPublicKey() throws Exception {
         CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("alias-verify", "secp256r1"));
         PKCS10CertificationRequest csr = parseCSR(result.csr);
 
@@ -146,7 +167,7 @@ public class CSRModuleTest {
     // ---- Key lifecycle: create -> keyExists -> getPublicKey -> deleteKey -> keyExists ----
 
     @Test
-    public void keyLifecycle_softwareKey_createThenExistsThenDeleteThenGone() throws Exception {
+    public void testSoftwareKeyLifecycleCreateThenExistsThenDeleteThenGone() throws Exception {
         String alias = "lifecycle-alias-" + System.identityHashCode(this);
         module.generateCSRInternal(paramsFor(alias, "secp256r1"));
 
@@ -174,7 +195,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void keyExists_unknownAlias_resolvesFalse() {
+    public void testKeyExistsForUnknownAliasResolvesFalse() {
         RecordingPromise promise = new RecordingPromise();
         module.keyExists("never-created-alias", promise);
         assertTrue(promise.resolved);
@@ -182,7 +203,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void getPublicKey_unknownAlias_rejects() {
+    public void testGetPublicKeyForUnknownAliasRejects() {
         RecordingPromise promise = new RecordingPromise();
         module.getPublicKey("never-created-alias", promise);
         assertTrue(promise.rejected);
@@ -190,7 +211,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void deleteKey_unknownAlias_resolvesFalse() {
+    public void testDeleteKeyForUnknownAliasResolvesFalse() {
         RecordingPromise promise = new RecordingPromise();
         module.deleteKey("never-created-alias", promise);
         assertTrue(promise.resolved);
@@ -200,7 +221,7 @@ public class CSRModuleTest {
     // ---- Software keystore round-trip: write then load back ----
 
     @Test
-    public void softwareKeystore_writeThenReload_roundTrips() throws Exception {
+    public void testSoftwareKeystoreWriteThenReloadRoundTrips() throws Exception {
         String alias = "roundtrip-alias";
         module.generateCSRInternal(paramsFor(alias, "secp256r1"));
 
@@ -216,7 +237,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void generateCSR_result_includesKeystoreDescriptorForSoftwareKey() throws Exception {
+    public void testGenerateCSRResultIncludesKeystoreDescriptorForSoftwareKey() throws Exception {
         CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("descriptor-alias", "secp256r1"));
 
         assertNotNull("software-backed keys must expose a keystore descriptor", result.keystorePath);
@@ -226,7 +247,7 @@ public class CSRModuleTest {
     // ---- Backup exclusion: the key lives outside the backup set, and legacy copies are moved ----
 
     @Test
-    public void keystore_livesInNoBackupDirectory() throws Exception {
+    public void testKeystoreLivesInNoBackupDirectory() throws Exception {
         File keystoreFile = module.getKeystoreFile();
 
         // getNoBackupFilesDir() is excluded from Auto Backup, cloud backup and device transfer
@@ -239,7 +260,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void legacyKeystore_isMovedOutOfBackupEligibleStorageWithKeysIntact() throws Exception {
+    public void testLegacyKeystoreIsMovedOutOfBackupEligibleStorageWithKeysIntact() throws Exception {
         // Produce a real keystore through production code, then stage it where installs created
         // before the no-backup change kept it.
         String alias = "legacy-migration-alias";
@@ -259,7 +280,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void legacyKeystore_supersededByCurrentLocation_isDeleted() throws Exception {
+    public void testLegacyKeystoreSupersededByCurrentLocationIsDeleted() throws Exception {
         module.generateCSRInternal(paramsFor("current-alias", "secp256r1"));
         File current = new File(context.getNoBackupFilesDir(), KEYSTORE_NAME);
         long currentLength = current.length();
@@ -271,16 +292,88 @@ public class CSRModuleTest {
         try (java.io.FileOutputStream fos = new java.io.FileOutputStream(legacy)) {
             fos.write("stale pre-migration keystore".getBytes());
         }
+        // Backdate it. On a straight upgrade the legacy copy is by definition the older one; only
+        // the downgrade case below produces a newer one, and that case is handled differently.
+        assertTrue(legacy.setLastModified(current.lastModified() - 60_000L));
 
         module.getKeystoreFile();
 
         assertFalse("stale legacy keystore must be deleted", legacy.exists());
         assertEquals("live keystore must not be overwritten by the stale copy",
                 currentLength, current.length());
+        assertTrue("an older legacy copy is stale, so nothing should be quarantined",
+                quarantinedNames(current, SUPERSEDED_INFIX).isEmpty());
     }
 
     @Test
-    public void legacyTempKeystore_isDeleted() throws Exception {
+    public void testLegacyKeystoreNewerThanNoBackupCopyWinsAndSupersededCopyIsQuarantined()
+            throws Exception {
+        // Downgrade then upgrade: the device ran a post-migration build (key in no_backup/), was
+        // rolled back to a pre-migration build, and re-enrolled - writing a *newer* key into
+        // getFilesDir(). Treating that one as stale would reactivate the older no-backup key and the
+        // certificate issued for the newer one would stop matching. Only reachable off the Play
+        // Store, which refuses to install a lower version.
+        // Staging cannot go through two generateCSR calls: the second one would migrate the first
+        // keystore back out of getFilesDir() before writing, so the two copies would never coexist.
+        // Produce each keystore with production code, then place them by hand.
+        String rolledBackAlias = "downgrade-reenrolled-alias";
+        module.generateCSRInternal(paramsFor(rolledBackAlias, "secp256r1"));
+        File current = new File(context.getNoBackupFilesDir(), KEYSTORE_NAME);
+        byte[] reenrolledKeystore = java.nio.file.Files.readAllBytes(current.toPath());
+        assertTrue(current.delete());
+
+        // The no-backup keystore as it stood before the downgrade: a different key, and older.
+        module.generateCSRInternal(paramsFor("pre-downgrade-alias", "secp256r1"));
+        File legacy = new File(context.getFilesDir(), KEYSTORE_NAME);
+        java.nio.file.Files.write(legacy.toPath(), reenrolledKeystore);
+        assertTrue("staging requires both copies to exist", current.exists() && legacy.exists());
+        assertTrue(current.setLastModified(legacy.lastModified() - 60_000L));
+
+        RecordingPromise promise = new RecordingPromise();
+        module.keyExists(rolledBackAlias, promise);
+
+        assertEquals("the newer legacy keystore must win, not be deleted as stale",
+                Boolean.TRUE, promise.resolvedValue);
+        assertFalse("the newer copy must not stay in backup-eligible storage", legacy.exists());
+
+        // The loser is a complete private key and the comparison that picked a winner is a
+        // modification time, so it is kept for forensics rather than silently discarded.
+        List<String> superseded = quarantinedNames(current, SUPERSEDED_INFIX);
+        assertEquals("the superseded no-backup copy should be quarantined, not deleted",
+                1, superseded.size());
+    }
+
+    @Test
+    public void testSupersededKeystoreThatCannotBeQuarantinedFailsInsteadOfDeletingTheNewerKey()
+            throws Exception {
+        // Same downgrade staging as above, but with the quarantine destination unusable. Returning
+        // normally here would drop straight into the "destination exists, so the source is stale"
+        // branch and delete the newer key.
+        module.generateCSRInternal(paramsFor("downgrade-reenrolled-alias", "secp256r1"));
+        File legacy = new File(context.getFilesDir(), KEYSTORE_NAME);
+        assertTrue(new File(context.getNoBackupFilesDir(), KEYSTORE_NAME).renameTo(legacy));
+
+        File altNoBackupDir = new File(context.getNoBackupFilesDir(), ALT_NO_BACKUP_DIR);
+        assertTrue(altNoBackupDir.isDirectory() || altNoBackupDir.mkdirs());
+        File superseded = new File(altNoBackupDir, KEYSTORE_NAME);
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(superseded)) {
+            fos.write("pre-downgrade keystore".getBytes());
+        }
+        assertTrue(superseded.setLastModified(legacy.lastModified() - 60_000L));
+        // A regular file occupying the keystore_forensics/ path makes mkdirs() fail for every user
+        // on every filesystem, root included.
+        assertTrue(new File(altNoBackupDir, FORENSICS_DIR).createNewFile());
+        context.setNoBackupFilesDirOverride(altNoBackupDir);
+
+        assertThrows(java.io.IOException.class, () -> module.getKeystoreFile());
+        assertTrue("the newer key must be left where it is rather than deleted as stale",
+                legacy.exists());
+        assertTrue("the superseded copy must not be destroyed by a failed quarantine",
+                superseded.exists());
+    }
+
+    @Test
+    public void testLegacyTempKeystoreIsDeleted() throws Exception {
         // An interrupted atomic write leaves a .tmp that is a complete copy of the keystore.
         File legacyTemp = new File(context.getFilesDir(), KEYSTORE_NAME + ".tmp");
         try (java.io.FileOutputStream fos = new java.io.FileOutputStream(legacyTemp)) {
@@ -293,7 +386,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void noBackupDirUnavailable_failsInsteadOfWritingToAnUnprotectedPath() {
+    public void testNoBackupDirUnavailableFailsInsteadOfWritingToAnUnprotectedPath() {
         context.setNoBackupFilesDirUnavailable(true);
 
         // new File((File) null, "software_keys.p12") is legal Java and yields a bare relative path
@@ -303,7 +396,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void noBackupDirUnavailable_keyExistsRejectsInsteadOfAnsweringFalse() {
+    public void testNoBackupDirUnavailableMakesKeyExistsRejectInsteadOfAnsweringFalse() {
         context.setNoBackupFilesDirUnavailable(true);
 
         RecordingPromise promise = new RecordingPromise();
@@ -317,43 +410,87 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void legacyKeystoreMigrationFailure_failsLoudlyInsteadOfShadowingTheKey() throws Exception {
-        // Stage a real keystore where pre-migration installs kept it, then make the destination
-        // directory unwritable so renameTo cannot succeed.
-        String alias = "migration-failure-alias";
-        module.generateCSRInternal(paramsFor(alias, "secp256r1"));
-        File noBackupDir = context.getNoBackupFilesDir();
-        File current = new File(noBackupDir, KEYSTORE_NAME);
-        File legacy = new File(context.getFilesDir(), KEYSTORE_NAME);
-        assertTrue(current.renameTo(legacy));
+    public void testNoBackupDirUnavailableMakesGetPublicKeyRejectInsteadOfReportingKeyNotFound() {
+        context.setNoBackupFilesDirUnavailable(true);
 
-        // setWritable() must be inside the try: as root it "succeeds" without actually revoking
-        // write access, and skipping the test at that point would leave the directory unwritable
-        // for every test that runs after this one.
-        boolean unwritable = noBackupDir.setWritable(false) && !noBackupDir.canWrite();
-        try {
-            assumeTrue("requires a filesystem where the destination dir can be made unwritable",
-                    unwritable);
+        RecordingPromise promise = new RecordingPromise();
+        module.getPublicKey("some-alias", promise);
 
-            // Returning the no-backup path here would make loadSoftwareKeyStore() see no file and
-            // build an empty keystore, so the device would re-enrol with a new key while its issued
-            // certificate silently stopped matching - and the old key would stay backup-eligible.
-            assertThrows(java.io.IOException.class, () -> module.getKeystoreFile());
-            assertTrue("the only copy of the key must be left intact for the next attempt",
-                    legacy.exists());
-        } finally {
-            noBackupDir.setWritable(true);
-        }
+        // KEY_NOT_FOUND is the answer for "this alias has no key", and an app is entitled to
+        // re-enrol on it. Unreachable storage is not that, so it has to arrive as a distinct error.
+        assertTrue(promise.rejected);
+        assertEquals("GET_PUBLIC_KEY_ERROR", promise.rejectedCode);
     }
 
     @Test
-    public void legacyFlatQuarantinedFiles_areMovedIntoNoBackupStorage() throws Exception {
+    public void testNoBackupDirUnavailableMakesDeleteKeyRejectInsteadOfResolvingFalse() {
+        context.setNoBackupFilesDirUnavailable(true);
+
+        RecordingPromise promise = new RecordingPromise();
+        module.deleteKey("some-alias", promise);
+
+        // Resolving false would read as "there was nothing to delete" when in fact the keystore was
+        // never reached and a key may well still be in it.
+        assertTrue(promise.rejected);
+        assertEquals("DELETE_KEY_ERROR", promise.rejectedCode);
+    }
+
+    @Test
+    public void testNoBackupDirUnavailableMakesHardwareBackedGenerateCSRFailInsteadOfLeavingAStaleSoftwareKey() {
+        // The hardware path deletes any software key under the same alias first, precisely so a
+        // later getPublicKey() cannot return the stale one. If that deletion cannot reach the
+        // keystore, it does not know whether a stale key is there, and a CSR issued anyway leaves the
+        // dual-store collision in place. Asserting on the type is what makes this test meaningful: a
+        // swallowed KeystoreLocationException lets generation continue to the hardware keystore,
+        // which fails with some other exception in this environment and would otherwise look alike.
+        ReflectionHelpers.setStaticField(android.os.Build.VERSION.class, "SDK_INT", 31);
+        context.setNoBackupFilesDirUnavailable(true);
+
+        JavaOnlyMap params = paramsFor("hardware-path-alias", "secp256r1");
+        params.putBoolean("useHardwareKey", true);
+
+        assertThrows(CSRModule.KeystoreLocationException.class,
+                () -> module.generateCSRInternal(params));
+    }
+
+    @Test
+    public void testLegacyKeystoreMigrationFailureFailsLoudlyInsteadOfShadowingTheKey() throws Exception {
+        // Stage a real keystore where pre-migration installs kept it, then point the module at a
+        // no-backup directory that cannot be written to.
+        String alias = "migration-failure-alias";
+        module.generateCSRInternal(paramsFor(alias, "secp256r1"));
+        File legacy = new File(context.getFilesDir(), KEYSTORE_NAME);
+        assertTrue(new File(context.getNoBackupFilesDir(), KEYSTORE_NAME).renameTo(legacy));
+
+        // The failure is injected rather than chmod-ed into place: setWritable(false) is a silent
+        // no-op as root, so a permission-based version of this test skips instead of asserting on a
+        // containerised CI runner - and this is the headline behaviour of the whole change.
+        // A regular file occupies BLOCKED_PARENT, so nothing can be created underneath it.
+        File blockedParent = new File(context.getNoBackupFilesDir(), BLOCKED_PARENT);
+        assertTrue(blockedParent.createNewFile());
+        context.setNoBackupFilesDirOverride(new File(blockedParent, "no_backup"));
+
+        // Returning the no-backup path here would make loadSoftwareKeyStore() see no file and
+        // build an empty keystore, so the device would re-enrol with a new key while its issued
+        // certificate silently stopped matching - and the old key would stay backup-eligible.
+        assertThrows(java.io.IOException.class, () -> module.getKeystoreFile());
+        assertTrue("the only copy of the key must be left intact for the next attempt",
+                legacy.exists());
+
+        // Same for the read paths that would otherwise answer "no key here".
+        RecordingPromise promise = new RecordingPromise();
+        module.keyExists(alias, promise);
+        assertTrue("a stranded legacy keystore must reject, not resolve false", promise.rejected);
+    }
+
+    @Test
+    public void testLegacyFlatQuarantinedFilesAreMovedIntoNoBackupStorage() throws Exception {
         // This is the layout an already-installed device actually holds: every release before the
         // keystore_forensics/ subdirectory existed wrote quarantined copies flat into the files dir
         // next to the live keystore. Each one is a complete copy of a private key, so a migration
         // that only swept the subdirectory would leave them backup-eligible forever.
         File legacyQuarantined =
-                new File(context.getFilesDir(), KEYSTORE_NAME + ".corrupted.20250101_000000");
+                new File(context.getFilesDir(), KEYSTORE_NAME + CORRUPTED_INFIX + "20250101_000000");
         try (java.io.FileOutputStream fos = new java.io.FileOutputStream(legacyQuarantined)) {
             fos.write("quarantined key material".getBytes());
         }
@@ -363,16 +500,16 @@ public class CSRModuleTest {
         assertFalse("flat quarantined copies must not stay in backup-eligible storage",
                 legacyQuarantined.exists());
         assertTrue("flat quarantined copies should be relocated for forensics, not discarded",
-                new File(new File(context.getNoBackupFilesDir(), "keystore_forensics"),
+                new File(new File(context.getNoBackupFilesDir(), FORENSICS_DIR),
                         legacyQuarantined.getName()).exists());
     }
 
     @Test
-    public void legacyQuarantinedFiles_areMovedIntoNoBackupStorage() throws Exception {
-        File legacyForensicsDir = new File(context.getFilesDir(), "keystore_forensics");
+    public void testLegacyQuarantinedFilesAreMovedIntoNoBackupStorage() throws Exception {
+        File legacyForensicsDir = new File(context.getFilesDir(), FORENSICS_DIR);
         assertTrue(legacyForensicsDir.isDirectory() || legacyForensicsDir.mkdirs());
         File legacyQuarantined =
-                new File(legacyForensicsDir, KEYSTORE_NAME + ".corrupted.20250101_000000000");
+                new File(legacyForensicsDir, KEYSTORE_NAME + CORRUPTED_INFIX + "20250101_000000000");
         try (java.io.FileOutputStream fos = new java.io.FileOutputStream(legacyQuarantined)) {
             fos.write("quarantined key material".getBytes());
         }
@@ -382,7 +519,7 @@ public class CSRModuleTest {
         assertFalse("quarantined copies must not stay in backup-eligible storage",
                 legacyQuarantined.exists());
         assertTrue("quarantined copies should be relocated for forensics, not discarded",
-                new File(new File(context.getNoBackupFilesDir(), "keystore_forensics"),
+                new File(new File(context.getNoBackupFilesDir(), FORENSICS_DIR),
                         legacyQuarantined.getName()).exists());
         assertFalse("emptied legacy forensics directory should be removed", legacyForensicsDir.exists());
     }
@@ -390,7 +527,7 @@ public class CSRModuleTest {
     // ---- Corruption handling: corrupt keystore is quarantined, regeneration proceeds ----
 
     @Test
-    public void corruptKeystore_isQuarantinedAndRegenerationSucceeds() throws Exception {
+    public void testCorruptKeystoreIsQuarantinedAndRegenerationSucceeds() throws Exception {
         // Establish a real keystore file first so getKeystoreFile() points at a live path.
         module.generateCSRInternal(paramsFor("pre-corruption-alias", "secp256r1"));
         File keystoreFile = module.getKeystoreFile();
@@ -414,7 +551,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void corruptedFileRetention_cappedAtThreeMostRecent() throws Exception {
+    public void testCorruptedFileRetentionCappedAtThreeMostRecent() throws Exception {
         module.generateCSRInternal(paramsFor("retention-seed-alias", "secp256r1"));
         File keystoreFile = module.getKeystoreFile();
 
@@ -456,12 +593,16 @@ public class CSRModuleTest {
     }
 
     private File forensicsDir(File keystoreFile) {
-        return new File(keystoreFile.getParentFile(), "keystore_forensics");
+        return new File(keystoreFile.getParentFile(), FORENSICS_DIR);
     }
 
     private List<String> quarantinedNames(File keystoreFile) {
+        return quarantinedNames(keystoreFile, CORRUPTED_INFIX);
+    }
+
+    private List<String> quarantinedNames(File keystoreFile, String infix) {
         File[] files = forensicsDir(keystoreFile).listFiles(
-                (dir, name) -> name.startsWith(keystoreFile.getName() + ".corrupted."));
+                (dir, name) -> name.startsWith(keystoreFile.getName() + infix));
         List<String> names = new ArrayList<>();
         if (files != null) {
             for (File file : files) {
@@ -474,25 +615,25 @@ public class CSRModuleTest {
     // ---- Input validation: exercise the real production isValidIPAddress ----
 
     @Test
-    public void isValidIPAddress_acceptsLiteralIPv4() {
+    public void testIsValidIPAddressAcceptsLiteralIPv4() {
         assertTrue(module.isValidIPAddress("192.168.1.1"));
         assertTrue(module.isValidIPAddress("10.0.0.1"));
     }
 
     @Test
-    public void isValidIPAddress_acceptsLiteralIPv6() {
+    public void testIsValidIPAddressAcceptsLiteralIPv6() {
         assertTrue(module.isValidIPAddress("::1"));
         assertTrue(module.isValidIPAddress("2001:db8::1"));
     }
 
     @Test
-    public void isValidIPAddress_rejectsHostnames() {
+    public void testIsValidIPAddressRejectsHostnames() {
         assertFalse(module.isValidIPAddress("localhost"));
         assertFalse(module.isValidIPAddress("example.com"));
     }
 
     @Test
-    public void isValidIPAddress_rejectsHostnamePortInjection() {
+    public void testIsValidIPAddressRejectsHostnamePortInjection() {
         // "host:port" strings are rejected by InetAddress.getByName() itself - a single
         // colon is not valid syntax for a hostname or an IP literal, so this fails via the
         // outer UnknownHostException catch rather than the colon-counting IPv6 guard below it.
@@ -501,7 +642,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void isValidIPAddress_acceptsBracketedIPv6() {
+    public void testIsValidIPAddressAcceptsBracketedIPv6() {
         // Covers the bracket-stripping normalization, which no other test input reaches: a
         // bracketed literal only compares equal to getHostAddress()'s unbracketed expanded form
         // after the brackets are removed. Like bare "::1", it then decides in the colon branch
@@ -511,7 +652,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void isValidIPAddress_rejectsHostnamesWithoutRelyingOnDNS() {
+    public void testIsValidIPAddressRejectsHostnamesWithoutRelyingOnDNS() {
         // ".invalid" is reserved by RFC 2606 and must never resolve, so this rejection is a
         // real hostname rejection on any runner - unlike "example.com", which passes via the
         // literal-comparison path when DNS resolves and via UnknownHostException when it
@@ -520,14 +661,14 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void isValidIPAddress_rejectsNullAndEmpty() {
+    public void testIsValidIPAddressRejectsNullAndEmpty() {
         assertFalse(module.isValidIPAddress(null));
         assertFalse(module.isValidIPAddress(""));
         assertFalse(module.isValidIPAddress("   "));
     }
 
     @Test
-    public void generateCSR_invalidIPAddress_isRejected() {
+    public void testGenerateCSRWithInvalidIPAddressIsRejected() {
         JavaOnlyMap params = paramsFor("bad-ip-alias", "secp256r1");
         params.putString("ipAddress", "not-a-hostname-or-ip!!");
 
@@ -539,7 +680,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void generateCSR_missingAlias_isRejected() {
+    public void testGenerateCSRWithMissingAliasIsRejected() {
         JavaOnlyMap params = new JavaOnlyMap();
         params.putString("commonName", "test-device");
 
@@ -551,7 +692,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void generateCSR_invalidCurve_isRejected() {
+    public void testGenerateCSRWithInvalidCurveIsRejected() {
         JavaOnlyMap params = paramsFor("bad-curve-alias", "secp256k1");
 
         RecordingPromise promise = new RecordingPromise();
@@ -562,7 +703,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void generateCSR_bridgeResult_includesKeystoreMapForSoftwareKey() {
+    public void testGenerateCSRBridgeResultIncludesKeystoreMapForSoftwareKey() {
         // Arguments.createMap() needs the native RN JNI library, which isn't available in
         // this JVM-only Robolectric environment (see generateCSRInternal's Javadoc for why
         // the bridge wrapper is split from the core logic in the first place). Mock the static
@@ -585,7 +726,7 @@ public class CSRModuleTest {
 
             ReadableMap keystore = response.getMap("keystore");
             assertNotNull(keystore);
-            assertTrue(keystore.getString("path").endsWith("software_keys.p12"));
+            assertTrue(keystore.getString("path").endsWith(KEYSTORE_NAME));
             assertEquals("", keystore.getString("password"));
             assertEquals("pkcs12", keystore.getString("format"));
         }
@@ -594,7 +735,7 @@ public class CSRModuleTest {
     // ---- getHardwareKeystoreCapabilities / TLS-compatibility detection ----
 
     @Test
-    public void hardwareCapabilities_belowApi31_notTlsCompatible() {
+    public void testHardwareCapabilitiesBelowApi31NotTlsCompatible() {
         // Android 11 (API 30) - below the API 31 PURPOSE_AGREE_KEY requirement.
         // Build.VERSION.SDK_INT is set directly (rather than via @Config(sdk=)) because
         // @Config triggers Robolectric's binary-resource loading path, which this module's
@@ -606,7 +747,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void hardwareCapabilities_api31Plus_tlsCompatible() {
+    public void testHardwareCapabilitiesApi31PlusTlsCompatible() {
         // Android 12 (API 31) - PURPOSE_AGREE_KEY support added.
         ReflectionHelpers.setStaticField(android.os.Build.VERSION.class, "SDK_INT", 31);
         CSRModule.HardwareCapabilities caps = module.getHardwareKeystoreCapabilitiesInternal();
@@ -615,7 +756,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void hardwareCapabilities_returnsDocumentedShape() {
+    public void testHardwareCapabilitiesReturnsDocumentedShape() {
         CSRModule.HardwareCapabilities caps = module.getHardwareKeystoreCapabilitiesInternal();
         assertNotNull(caps.manufacturer);
         assertNotNull(caps.model);
@@ -623,7 +764,7 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void generateCSR_hardwareRequestedButUnsupported_fallsBackToSoftware() throws Exception {
+    public void testGenerateCSRHardwareRequestedButUnsupportedFallsBackToSoftware() throws Exception {
         // Set SDK explicitly rather than relying on Robolectric's ambient default (which is
         // derived from build.gradle's targetSdk/compileSdk 36, not a low fallback value) -
         // canUseHardwareKeysForTLS() requires API 31+, so API 30 forces software fallback.

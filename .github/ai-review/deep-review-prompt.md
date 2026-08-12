@@ -38,7 +38,7 @@ Model: opus (deepest reasoning for correctness and security)
 
 ### consistency-reviewer
 Check adherence to project patterns and conventions.
-Focus: hardware vs software keystore decision logic, BouncyCastle provider management (remove system BC first), EncryptedFile usage for software keys, ProGuard rules, type safety (ECCurve unions)
+Focus: hardware vs software keystore decision logic, BouncyCastle provider management (remove system BC first), software keystore location and migration, ProGuard rules, type safety (ECCurve unions)
 Model: sonnet
 
 ### completeness-reviewer
@@ -83,12 +83,13 @@ If opus fails with model access error, retry with sonnet and note downgrade in r
 - TLS compatibility: Must accurately check device capabilities
 Flag hardware keystore usage on Android <12 without fallback.
 
-### Critical: Software Keystore Encryption (robustness + consistency reviewers)
-- Must use `EncryptedFile` from AndroidX Security (v1.2.0+)
-- AES256-GCM encryption with hardware-backed key
+### Critical: Software Keystore Storage (robustness + consistency reviewers)
+- Plain PKCS12 with an empty password, stored in `getNoBackupFilesDir()` (v1.4.0+)
 - File permissions set to mode 0600
-- Excluded from backups via backup_rules.xml
-Flag software keys without encryption or missing backup exclusion.
+- Backup exclusion comes from the no-backup directory itself; the library ships no backup_rules.xml / data_extraction_rules.xml, because those manifest attributes take a single resource each and any other dependency claiming them silently disabled the exclusions
+- Application-layer encryption (`EncryptedFile` + Tink, v1.2.0) was removed in v1.3.0: a stale keyset after reinstall caused endless key regeneration. Do NOT flag its absence, nor the empty keystore password.
+- Legacy copies in `getFilesDir()` (keystore, `.tmp`, quarantined `.corrupted.*` / `.superseded.*`) are migrated on first access
+Flag private key material written to backup-eligible storage, a fallback path used when the no-backup directory is unavailable, or a failed migration that returns normally instead of throwing.
 
 ### Critical: BouncyCastle Provider (robustness + consistency reviewers)
 - Remove system BC provider before registration

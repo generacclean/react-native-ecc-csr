@@ -23,11 +23,12 @@ export interface CSRParams {
 export interface CSRKeystoreDescriptor {
   path: string;
   /**
-   * Optional, and today always `""` — the keystore is protected by app-private storage
-   * and 0600 permissions rather than a passphrase. Declared optional so callers are not
-   * forced to handle a field with exactly one possible value; treat an absent password
-   * as the empty one. It exists so a future release can populate it without a breaking
-   * type change.
+   * Today always `""` — the keystore is protected by app-private no-backup storage and 0600
+   * permissions rather than a passphrase.
+   *
+   * Declared optional purely so a future release can change what it carries without a breaking
+   * type change. The native module always populates it, so `undefined` does not occur in
+   * practice; if you handle it defensively, treat an absent password as the empty one.
    */
   password?: string;
   format: 'pkcs12';
