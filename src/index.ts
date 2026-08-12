@@ -20,6 +20,20 @@ export interface CSRParams {
   useHardwareKey?: boolean;
 }
 
+export interface CSRKeystoreDescriptor {
+  path: string;
+  /**
+   * Today always `""` — the keystore is protected by app-private no-backup storage and 0600
+   * permissions rather than a passphrase.
+   *
+   * Declared optional purely so a future release can change what it carries without a breaking
+   * type change. The native module always populates it, so `undefined` does not occur in
+   * practice; if you handle it defensively, treat an absent password as the empty one.
+   */
+  password?: string;
+  format: 'pkcs12';
+}
+
 export interface CSRResult {
   csr: string;
   privateKeyAlias: string;
@@ -28,6 +42,13 @@ export interface CSRResult {
   useHardwareKey: boolean;
   hardwareKeyRequested: boolean;
   tlsCompatible: boolean;
+  /**
+   * Android only. Present when the key was stored in the software keystore
+   * (useHardwareKey === false) on Android. Hardware-backed keys live in the Android
+   * Keystore and have no keystore file to describe. On iOS this field is always
+   * absent — keys are stored in the Keychain, not a file, regardless of useHardwareKey.
+   */
+  keystore?: CSRKeystoreDescriptor;
 }
 
 export interface HardwareKeystoreCapabilities {

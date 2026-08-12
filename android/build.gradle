@@ -30,6 +30,23 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
+
+    buildFeatures {
+        // Required because CSRModule.java reads BuildConfig.DEBUG to gate verbose logging.
+        buildConfig true
+    }
+
+    testOptions {
+        unitTests {
+            // Robolectric needs the merged manifest and compiled resources on the unit-test
+            // classpath. Without this it finds no manifest, falls back to "legacy resources mode",
+            // and that mode is unsupported after API 28 - so it silently ran every Robolectric test
+            // against its API 16 floor, seven levels below this module's minSdk of 23. Any platform
+            // API added after 16 then failed at runtime with NoSuchMethodError despite compiling
+            // cleanly against compileSdk 36.
+            includeAndroidResources = true
+        }
+    }
 }
 
 repositories {
@@ -38,11 +55,21 @@ repositories {
 }
 
 dependencies {
-    implementation "com.facebook.react:react-native:+"
+    // React Native classes are provided by the consuming app at compile/runtime via
+    // autolinking; compileOnly avoids bundling them into this module's AAR.
+    // Pinned to a Maven Central coordinate (published since RN 0.71) rather than the
+    // "com.facebook.react:react-native:+" autolinking wildcard, which only resolves
+    // inside a consuming app's local Maven repo and breaks standalone Gradle builds.
+    // This module compiles against exactly this version regardless of the consuming
+    // app's actual RN version - bump deliberately if the bridge API this module uses
+    // (Promise, ReactApplicationContext, ReadableMap, WritableMap) ever changes shape,
+    // e.g. as part of the Turbo Modules migration (IA-5752).
+    compileOnly 'com.facebook.react:react-android:0.76.0'
     implementation 'org.bouncycastle:bcprov-jdk18on:1.76'
     implementation 'org.bouncycastle:bcpkix-jdk18on:1.76'
 
     // Test dependencies
+    testImplementation 'com.facebook.react:react-android:0.76.0'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.mockito:mockito-core:5.3.1'
     testImplementation 'org.robolectric:robolectric:4.10.3'

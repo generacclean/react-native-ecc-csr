@@ -29,7 +29,3 @@
 
 # Suppress warnings for optional dependencies
 -dontwarn org.bouncycastle.**
-
-# AndroidX Security Library (for EncryptedFile)
--keep class androidx.security.crypto.** { *; }
--keepclassmembers class androidx.security.crypto.** { *; }

@@ -60,7 +60,39 @@ public class CSRModule extends ReactContextBaseJavaModule {
     private static final String MODULE_NAME = "CSRModule";
     private static final String ANDROID_KEYSTORE = "AndroidKeyStore";
 
-    private static final String SOFTWARE_KEYSTORE_FILE = "software_keys.p12";
+    /** Package-private for the same reason as {@link #CORRUPTED_INFIX}. */
+    static final String SOFTWARE_KEYSTORE_FILE = "software_keys.p12";
+    private static final String TEMP_SUFFIX = ".tmp";
+
+    /**
+     * Filename infix marking a quarantined copy of a corrupt keystore. The full name is
+     * "<keystore>.corrupted.<yyyyMMdd_HHmmssSSS>", which sorts lexicographically in chronological
+     * order - see {@link #cleanupQuarantinedFiles}.
+     *
+     * Package-private so tests can stage and assert on quarantine filenames through the same
+     * constant production uses, instead of a copy that can drift out of step with it.
+     */
+    static final String CORRUPTED_INFIX = ".corrupted.";
+
+    /**
+     * Filename infix marking a keystore that lost a newer-copy comparison during migration - see
+     * {@link #quarantineSupersededKeystore}. Same timestamp format and retention rules as
+     * {@link #CORRUPTED_INFIX}, but a distinct infix so a forensic reader can tell "this keystore
+     * would not parse" from "a newer copy of this keystore turned up in the legacy location".
+     */
+    static final String SUPERSEDED_INFIX = ".superseded.";
+
+    /**
+     * Subdirectory for quarantined corrupt keystore files. Keeps timestamped
+     * ".corrupted.<timestamp>" copies grouped in one place instead of scattered alongside the live
+     * keystore. It lives inside the no-backup directory (see {@link #getKeystoreDir()}), so
+     * quarantined copies of the private key are excluded from backups on the same terms as the
+     * live keystore.
+     *
+     * Releases before this directory existed wrote quarantined copies flat into getFilesDir()
+     * alongside the live keystore; {@link #migrateLegacyKeystoreIfNeeded} relocates those too.
+     */
+    private static final String CORRUPTED_KEYSTORE_DIR = "keystore_forensics";
 
     /**
      * PKCS12 keystore password - intentionally empty for app-private storage.
@@ -68,7 +100,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * SECURITY RATIONALE (for code reviewers):
      *
      * 1. **Defense in depth through OS-level protection:**
-     *    - File stored in app-private directory (/data/data/com.app/files/)
+     *    - File stored in app-private no-backup directory (/data/data/com.app/no_backup/)
      *    - Android enforces per-app sandboxing - no other apps can read this
      *    - File permissions: 0600 (owner read/write only)
      *    - Root/physical access required to extract (same as any app data)
@@ -88,7 +120,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * 4. **Empty password does NOT weaken security model:**
      *    - THREAT: Malicious app reading our keystore → OS prevents via sandboxing
      *    - THREAT: Device theft with root access → Android Keystore (hardware) is the defense
-     *    - THREAT: Backup extraction → Android excludes app-private files from backups
+     *    - THREAT: Backup extraction → key lives in getNoBackupFilesDir(), which Android never backs up
      *    - Password would only help if file was world-readable (it's not)
      *
      * 5. **Industry precedent:**
@@ -132,11 +164,285 @@ public class CSRModule extends ReactContextBaseJavaModule {
     private static final Object SOFTWARE_KEYSTORE_LOCK = new Object();
 
     /**
+     * Directory holding the software keystore: {@link android.content.Context#getNoBackupFilesDir()},
+     * not {@code getFilesDir()}.
+     *
+     * Android never includes the no-backup directory in Auto Backup, cloud backup, or device
+     * transfer, and that is true regardless of what the consuming app puts in its manifest. This
+     * matters because android:fullBackupContent and android:dataExtractionRules each accept exactly
+     * one resource reference and nothing merges them, so a library cannot reliably contribute
+     * backup exclusions - whichever library or app sets the attribute wins and everyone else's
+     * rules are silently inactive. Storing the private key outside the backup set removes that
+     * coordination problem instead of documenting around it.
+     *
+     * Side effect: migrates any pre-existing keystore out of the legacy backup-eligible location.
+     *
+     * @throws IOException if the no-backup directory is unavailable, or if a legacy keystore could
+     *         not be migrated. Both cases are failed loudly rather than worked around, because the
+     *         quiet alternatives put private key material somewhere the caller does not expect.
+     */
+    File getKeystoreDir() throws IOException {
+        File noBackupDir = getReactApplicationContext().getNoBackupFilesDir();
+        if (noBackupDir == null) {
+            // new File((File) null, name) is legal Java and yields the bare relative path
+            // "software_keys.p12", resolved against the process working directory - outside the
+            // no-backup guarantee this class relies on and outside the 0600 hardening below. The
+            // blast radius is key material, so refuse rather than write to an unknown location.
+            throw new KeystoreLocationException(
+                    "getNoBackupFilesDir() returned null; refusing to store the private key outside no-backup storage");
+        }
+        migrateLegacyKeystoreIfNeeded(noBackupDir);
+        return noBackupDir;
+    }
+
+    /**
+     * The software keystore's location could not be established: either no-backup storage is
+     * unavailable, or a legacy keystore is stranded in backup-eligible storage.
+     *
+     * Distinct from a generic failure because the keystore-reading entry points below deliberately
+     * swallow "no software keystore here" and answer false / KEY_NOT_FOUND. Answering that way when
+     * storage itself is broken would tell the app its key is gone, and the app would re-enrol with a
+     * fresh key while the existing certificate silently stopped matching.
+     *
+     * Every method that catches broadly around a keystore access rethrows this type ahead of its
+     * generic clause - keyExists, getPublicKey, deleteKey, deleteSoftwareKeyIfExists and
+     * generateCSRInternal - so it reaches the bridge and the promise rejects. Adding a new such
+     * catch without that clause is what turns this back into a log line.
+     */
+    static class KeystoreLocationException extends IOException {
+        KeystoreLocationException(String message) {
+            super(message);
+        }
+
+        KeystoreLocationException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /**
+     * Move the keystore, any stale temp file, and any quarantined copies out of getFilesDir().
+     *
+     * Installs created before this change hold the key at files/software_keys.p12, which IS
+     * backup-eligible whenever the consuming app allows backups and does not exclude the file
+     * domain. Leaving it there would keep that exposure alive for every existing install, so the
+     * legacy copy is not merely ignored - it is relocated, or deleted when the new location is
+     * already populated and the legacy file is therefore stale.
+     *
+     * Deliberately not cached behind a flag: the check is a single stat, and running it on every
+     * lookup means a partially-completed migration self-heals on the next call.
+     *
+     * @throws IOException if the live keystore exists in the legacy location and cannot be moved.
+     *         Only that one file is fatal; see {@link #migrateLegacyQuarantinedFiles} for why the
+     *         quarantined copies are best-effort.
+     */
+    private void migrateLegacyKeystoreIfNeeded(File noBackupDir) throws IOException {
+        File legacyDir = getReactApplicationContext().getFilesDir();
+        if (legacyDir == null || legacyDir.equals(noBackupDir)) {
+            return;
+        }
+
+        synchronized (SOFTWARE_KEYSTORE_LOCK) {
+            File legacyKeystore = new File(legacyDir, SOFTWARE_KEYSTORE_FILE);
+            File currentKeystore = new File(noBackupDir, SOFTWARE_KEYSTORE_FILE);
+
+            quarantineSupersededKeystore(legacyKeystore, currentKeystore, noBackupDir);
+
+            if (!moveOutOfBackupEligibleStorage(legacyKeystore, currentKeystore)) {
+                // Returning normally here would hand callers the no-backup path while the only
+                // copy of the key sits at the legacy one. loadSoftwareKeyStore() would find no
+                // file, create an empty keystore, and the device would silently re-enrol with a
+                // new key while its issued certificate stopped matching. Fail so the caller can
+                // retry instead.
+                throw new KeystoreLocationException(
+                        "Failed to migrate legacy software keystore out of backup-eligible storage: "
+                                + legacyKeystore.getAbsolutePath());
+            }
+
+            // A leftover .tmp is a complete copy of the keystore, so it is just as sensitive.
+            File legacyTemp = new File(legacyDir, SOFTWARE_KEYSTORE_FILE + TEMP_SUFFIX);
+            if (legacyTemp.exists() && !legacyTemp.delete()) {
+                Log.w(MODULE_NAME, "Failed to delete legacy temp keystore from backup-eligible storage");
+            }
+
+            migrateLegacyQuarantinedFiles(legacyDir, noBackupDir);
+        }
+    }
+
+    /**
+     * Step aside for a legacy keystore that is not older than the no-backup one.
+     *
+     * {@link #moveOutOfBackupEligibleStorage} reads a populated destination as proof the legacy file
+     * is a stale leftover, which is true for a straight upgrade: the migration renames the file, so
+     * the two cannot both exist afterwards. It is not true across downgrade then upgrade. A device
+     * that ran a post-migration build (key in no_backup/), downgraded to a pre-migration build, and
+     * re-enrolled wrote a *newer* key into getFilesDir(). Deleting that one as stale would silently
+     * reactivate the older no-backup key while the certificate issued for the newer one stopped
+     * matching - the failure this whole migration exists to avoid. Only reachable on
+     * sideload/enterprise/dev channels, since the Play Store refuses to install a lower version.
+     *
+     * The loser is quarantined rather than deleted. It is a complete private key, and the comparison
+     * that picked a winner is a modification time; if that inference is ever wrong, a forensic copy
+     * in no-backup storage is recoverable and a deletion is not.
+     *
+     * A tie is treated as "the legacy copy may be newer", not as "the no-backup copy wins", which is
+     * why the comparison is strictly less-than. {@link #cleanupQuarantinedFiles} documents why
+     * lastModified() cannot rank two files on a filesystem that reports modification times at one-
+     * or two-second resolution, and both files here are produced within the same second on the path
+     * that produces them: a single generateCSR() call writes getFilesDir()/software_keys.p12 moments
+     * after the no-backup copy was last touched. Equal stamps under a {@code <=} test would return
+     * early, and {@link #moveOutOfBackupEligibleStorage} would then read the populated destination as
+     * proof the legacy file is stale and delete it - deleting the newer key and reactivating the
+     * older one. Quarantining on a tie keeps both: the legacy copy becomes live and the no-backup one
+     * is preserved for forensics. The tie is not resolvable from the filesystem - the no-backup copy
+     * carries no embedded timestamp, so the filename-based recency trick that
+     * {@link #cleanupQuarantinedFiles} uses does not transfer - so the safe answer is to keep both
+     * copies. Cost is one extra forensic copy in the (unreachable-by-rename) case where both files
+     * legitimately share a stamp, and the retention cap already bounds those at three.
+     *
+     * @throws IOException if the older copy cannot be quarantined. Returning normally would hand the
+     *         caller straight back to {@link #moveOutOfBackupEligibleStorage}, which would then
+     *         delete the newer legacy key as superseded - so failing here is what keeps the
+     *         newer-copy guarantee from degrading into the exact data loss it prevents.
+     */
+    private void quarantineSupersededKeystore(File legacyKeystore, File currentKeystore, File noBackupDir)
+            throws IOException {
+        if (!legacyKeystore.exists() || !currentKeystore.exists()
+                || legacyKeystore.lastModified() < currentKeystore.lastModified()) {
+            return;
+        }
+
+        File forensicsDir = new File(noBackupDir, CORRUPTED_KEYSTORE_DIR);
+        if (!forensicsDir.isDirectory() && !forensicsDir.mkdirs()) {
+            throw new KeystoreLocationException(
+                    "A software keystore in backup-eligible storage is not older than the no-backup "
+                            + "copy but the superseded no-backup copy cannot be quarantined: "
+                            + "forensics directory unavailable");
+        }
+
+        File superseded = new File(
+                forensicsDir, SOFTWARE_KEYSTORE_FILE + SUPERSEDED_INFIX + quarantineTimestamp());
+        if (!currentKeystore.renameTo(superseded)) {
+            throw new KeystoreLocationException(
+                    "A software keystore in backup-eligible storage is not older than the no-backup "
+                            + "copy but the superseded no-backup copy could not be quarantined: "
+                            + currentKeystore.getAbsolutePath());
+        }
+
+        Log.w(MODULE_NAME, "Legacy software keystore is not older than the no-backup copy (downgrade "
+                + "then upgrade, or an unrankable tie); quarantined the superseded copy as "
+                + superseded.getName());
+        cleanupQuarantinedFiles(forensicsDir, SOFTWARE_KEYSTORE_FILE, SUPERSEDED_INFIX);
+    }
+
+    /**
+     * Relocate quarantined corrupt keystores - each a complete copy of a private key - into
+     * no-backup storage.
+     *
+     * Two legacy layouts exist and both have to be swept. Every release before this one wrote them
+     * flat into getFilesDir() next to the live keystore ("software_keys.p12.corrupted.<ts>"), which
+     * is what an already-installed device actually holds. A getFilesDir()/keystore_forensics/
+     * directory only appears if a previous migration attempt was interrupted partway.
+     *
+     * Failures here are logged rather than thrown: unlike the live keystore, a stranded quarantine
+     * copy is a privacy problem and not a correctness one, and the next lookup retries.
+     *
+     * One branch is worse than the others and is logged at error level accordingly: if the
+     * destination directory cannot be created, no copy moves at all, and a retry hits the same
+     * failure every time rather than making progress. The live keystore has already moved by that
+     * point, so the caller sees a healthy migration while N complete copies of a private key stay in
+     * backup-eligible storage.
+     */
+    private void migrateLegacyQuarantinedFiles(File legacyDir, File noBackupDir) {
+        List<File> legacyQuarantined = new ArrayList<>();
+
+        FilenameFilter quarantineFilter =
+                (dir, name) -> name.startsWith(SOFTWARE_KEYSTORE_FILE + CORRUPTED_INFIX);
+
+        File[] flat = legacyDir.listFiles(quarantineFilter);
+        if (flat != null) {
+            legacyQuarantined.addAll(java.util.Arrays.asList(flat));
+        }
+
+        // Filtered on the same prefix as the flat sweep and as the retention cap below. An
+        // unfiltered listing would also move entries the cap cannot see - including directories,
+        // which renameTo() relocates just as happily - so they would accumulate uncapped.
+        File legacyForensicsDir = new File(legacyDir, CORRUPTED_KEYSTORE_DIR);
+        File[] nested = legacyForensicsDir.listFiles(quarantineFilter);
+        if (nested != null) {
+            legacyQuarantined.addAll(java.util.Arrays.asList(nested));
+        }
+
+        if (legacyQuarantined.isEmpty()) {
+            return;
+        }
+
+        File forensicsDir = new File(noBackupDir, CORRUPTED_KEYSTORE_DIR);
+        if (!forensicsDir.isDirectory() && !forensicsDir.mkdirs()) {
+            Log.e(MODULE_NAME, "Failed to create no-backup forensics directory during migration: "
+                    + legacyQuarantined.size()
+                    + " legacy private key copies remain in backup-eligible storage");
+            return;
+        }
+
+        for (File file : legacyQuarantined) {
+            moveOutOfBackupEligibleStorage(file, new File(forensicsDir, file.getName()));
+        }
+
+        File[] unmovable = legacyForensicsDir.listFiles();
+        if (unmovable != null && unmovable.length > 0) {
+            Log.w(MODULE_NAME, "Legacy forensics directory holds " + unmovable.length
+                    + " entry/entries this migration does not recognise; leaving it in place");
+        } else if (legacyForensicsDir.isDirectory() && !legacyForensicsDir.delete()) {
+            Log.w(MODULE_NAME, "Failed to remove emptied legacy forensics directory");
+        }
+
+        // Migrated copies bypass the quarantine path that normally enforces the cap, so apply it
+        // here. Note this runs over the destination directory, so it ranks migrated copies together
+        // with any this release already quarantined and can drop either - which is the intent: the
+        // cap is on how many quarantined copies of a private key exist, not on how many arrived.
+        cleanupQuarantinedFiles(forensicsDir, SOFTWARE_KEYSTORE_FILE, CORRUPTED_INFIX);
+    }
+
+    /**
+     * Relocate one file into no-backup storage.
+     *
+     * If the destination already exists, the source is a stale leftover and gets deleted - keeping
+     * it would leave a copy of the private key in the backup set for no benefit.
+     *
+     * @return false only when the file exists but could not be relocated, i.e. the source is still
+     *         sitting in backup-eligible storage and the destination is still absent. A failed
+     *         cleanup of a superseded source returns true: the destination is authoritative in that
+     *         case, so callers can proceed.
+     */
+    private boolean moveOutOfBackupEligibleStorage(File source, File destination) {
+        if (!source.exists()) {
+            return true;
+        }
+        if (destination.exists()) {
+            if (!source.delete()) {
+                Log.w(MODULE_NAME, "Failed to delete superseded legacy file: " + source.getName());
+            }
+            return true;
+        }
+        if (source.renameTo(destination)) {
+            Log.i(MODULE_NAME, "Migrated " + source.getName() + " to no-backup storage");
+            return true;
+        }
+        Log.w(MODULE_NAME, "Failed to migrate " + source.getName() + " to no-backup storage");
+        return false;
+    }
+
+    /**
      * Get File object for software keystore (plain file, no encryption).
      * Replaces EncryptedFile approach which had Tink keyset synchronization issues.
+     *
+     * Side effect: re-applies 0600 permissions to the file if it already exists. This is
+     * idempotent and cheap, so callers don't need to treat this as a pure path lookup.
+     *
+     * @throws IOException see {@link #getKeystoreDir()}
      */
-    private File getKeystoreFile() {
-        File file = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE);
+    File getKeystoreFile() throws IOException {
+        File file = new File(getKeystoreDir(), SOFTWARE_KEYSTORE_FILE);
         // Set secure permissions if file exists
         if (file.exists()) {
             setSecureFilePermissions(file);
@@ -171,18 +477,26 @@ public class CSRModule extends ReactContextBaseJavaModule {
             // Move it aside and start fresh to prevent permanent failure
             Log.e(MODULE_NAME, "Corrupt keystore detected, recovering by creating fresh keystore", e);
 
-            String timestamp = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
-                    .format(new java.util.Date());
+            File forensicsDir = new File(keystoreFile.getParentFile(), CORRUPTED_KEYSTORE_DIR);
+            if (!forensicsDir.isDirectory() && !forensicsDir.mkdirs()) {
+                Log.w(MODULE_NAME, "Failed to create forensics directory, deleting corrupt keystore instead");
+                if (!keystoreFile.delete()) {
+                    throw new IOException("Failed to delete corrupt keystore file", e);
+                }
+                keyStore.load(null, KEYSTORE_PASSWORD);
+                return keyStore;
+            }
+
             File corruptedFile = new File(
-                keystoreFile.getParent(),
-                keystoreFile.getName() + ".corrupted." + timestamp
+                forensicsDir,
+                keystoreFile.getName() + CORRUPTED_INFIX + quarantineTimestamp()
             );
 
             if (keystoreFile.renameTo(corruptedFile)) {
                 Log.w(MODULE_NAME, "Moved corrupt keystore to: " + corruptedFile.getName());
 
                 // Clean up old .corrupted files (keep only the most recent 3)
-                cleanupCorruptedFiles(keystoreFile.getParentFile(), keystoreFile.getName());
+                cleanupQuarantinedFiles(forensicsDir, keystoreFile.getName(), CORRUPTED_INFIX);
             } else {
                 // If rename fails, delete the corrupt file as last resort
                 Log.w(MODULE_NAME, "Failed to rename corrupt keystore, deleting it");
@@ -206,10 +520,16 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * Pattern: write to .tmp → fsync → atomic rename → final file only updated if successful
      *
      * Addresses review concern: "Non-atomic rewrite can lose the entire keystore"
+     *
+     * Guarantee: by the time this method returns normally, the keystore file at
+     * getKeystoreFile()'s path is fully written and in place - callers may read its path
+     * immediately afterward without needing to wait for any further completion signal.
      */
     private void saveSoftwareKeyStore(KeyStore keyStore) throws Exception {
         File keystoreFile = getKeystoreFile();
-        File tempFile = new File(getReactApplicationContext().getFilesDir(), SOFTWARE_KEYSTORE_FILE + ".tmp");
+        // Same directory as the target so the rename below stays within one filesystem (and so the
+        // temp copy is never written to backup-eligible storage).
+        File tempFile = new File(keystoreFile.getParentFile(), SOFTWARE_KEYSTORE_FILE + TEMP_SUFFIX);
 
         // Delete temp file if it exists from previous failed write
         if (tempFile.exists() && !tempFile.delete()) {
@@ -415,6 +735,25 @@ public class CSRModule extends ReactContextBaseJavaModule {
     }
 
     /**
+     * Package-private (not private) so unit tests assert against the same alias rule
+     * generateCSRInternal enforces, rather than a copy that can drift from production.
+     */
+    boolean isValidAlias(String alias) {
+        return alias != null && !alias.trim().isEmpty();
+    }
+
+    /**
+     * Package-private (not private) so unit tests assert against the same curve allow-list
+     * generateCSRInternal enforces, rather than a copy that can drift from production.
+     */
+    boolean isValidCurve(String curve) {
+        return curve != null
+                && (curve.equals("secp256r1")
+                    || curve.equals("secp384r1")
+                    || curve.equals("secp521r1"));
+    }
+
+    /**
      * IP address validation - accepts only literal IP addresses, not hostnames.
      *
      * InetAddress.getByName() accepts hostnames that resolve via DNS, so we must
@@ -422,7 +761,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      * address string. This prevents hostname injection into SAN iPAddress extensions,
      * which would produce malformed certificates.
      */
-    private boolean isValidIPAddress(String ip) {
+    boolean isValidIPAddress(String ip) {
         if (ip == null || ip.trim().isEmpty()) {
             return false;
         }
@@ -455,10 +794,13 @@ public class CSRModule extends ReactContextBaseJavaModule {
             // For IPv6, also check if both addresses contain colons (not port numbers)
             // Port notation like "host:8080" should be rejected
             if (inputForComparison.contains(":")) {
-                // Count colons - IPv6 has multiple, port notation has one
+                // Defense-in-depth: every valid IPv6 literal has at least 2 colons (even "::"),
+                // and InetAddress.getByName already throws UnknownHostException above for a
+                // single-colon string like "host:8080" before this line is reached - so this
+                // branch is not currently reachable, but is kept in case that parsing behavior
+                // ever changes across JVM/Android versions.
                 int colonCount = inputForComparison.length() - inputForComparison.replace(":", "").length();
                 if (colonCount < 2) {
-                    // Likely "hostname:port" format, not IPv6
                     return false;
                 }
 
@@ -508,7 +850,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
     }
 
     // Sanitize DN values (already handled by X500NameBuilder, but add explicit method)
-    private String sanitizeDNValue(String value) {
+    String sanitizeDNValue(String value) {
         if (value == null) {
             return "";
         }
@@ -516,8 +858,130 @@ public class CSRModule extends ReactContextBaseJavaModule {
         return value.trim();
     }
 
+    /** Thrown for validation failures that should be surfaced to JS as a specific error code. */
+    static class CSRRejectedException extends Exception {
+        final String code;
+
+        CSRRejectedException(String code, String message) {
+            super(message);
+            this.code = code;
+        }
+    }
+
+    /** Plain-Java result of a CSR generation, decoupled from the RN bridge's WritableMap. */
+    static class CSRGenerationResult {
+        final String csr;
+        final String privateKeyAlias;
+        final String publicKeyBase64;
+        final boolean isHardwareBacked;
+        final boolean useHardwareKey;
+        final boolean hardwareKeyRequested;
+        final boolean tlsCompatible;
+        final String keystorePath; // null when useHardwareKey is true
+
+        private CSRGenerationResult(Builder builder) {
+            this.csr = builder.csr;
+            this.privateKeyAlias = builder.privateKeyAlias;
+            this.publicKeyBase64 = builder.publicKeyBase64;
+            this.isHardwareBacked = builder.isHardwareBacked;
+            this.useHardwareKey = builder.useHardwareKey;
+            this.hardwareKeyRequested = builder.hardwareKeyRequested;
+            this.tlsCompatible = builder.tlsCompatible;
+            this.keystorePath = builder.keystorePath;
+        }
+
+        static Builder builder(String csr, String privateKeyAlias, String publicKeyBase64) {
+            return new Builder(csr, privateKeyAlias, publicKeyBase64);
+        }
+
+        // Named setters so call sites can't silently swap same-typed boolean arguments.
+        static class Builder {
+            private final String csr;
+            private final String privateKeyAlias;
+            private final String publicKeyBase64;
+            private boolean isHardwareBacked;
+            private boolean useHardwareKey;
+            private boolean hardwareKeyRequested;
+            private boolean tlsCompatible;
+            private String keystorePath;
+
+            private Builder(String csr, String privateKeyAlias, String publicKeyBase64) {
+                this.csr = csr;
+                this.privateKeyAlias = privateKeyAlias;
+                this.publicKeyBase64 = publicKeyBase64;
+            }
+
+            Builder isHardwareBacked(boolean value) {
+                this.isHardwareBacked = value;
+                return this;
+            }
+
+            Builder useHardwareKey(boolean value) {
+                this.useHardwareKey = value;
+                return this;
+            }
+
+            Builder hardwareKeyRequested(boolean value) {
+                this.hardwareKeyRequested = value;
+                return this;
+            }
+
+            Builder tlsCompatible(boolean value) {
+                this.tlsCompatible = value;
+                return this;
+            }
+
+            Builder keystorePath(String value) {
+                this.keystorePath = value;
+                return this;
+            }
+
+            CSRGenerationResult build() {
+                return new CSRGenerationResult(this);
+            }
+        }
+    }
+
     @ReactMethod
     public void generateCSR(ReadableMap params, Promise promise) {
+        try {
+            CSRGenerationResult result = generateCSRInternal(params);
+
+            com.facebook.react.bridge.WritableMap response = com.facebook.react.bridge.Arguments.createMap();
+            response.putString("csr", result.csr);
+            response.putString("privateKeyAlias", result.privateKeyAlias);
+            response.putString("publicKey", result.publicKeyBase64);
+            response.putBoolean("isHardwareBacked", result.isHardwareBacked);
+            response.putBoolean("useHardwareKey", result.useHardwareKey);
+            response.putBoolean("hardwareKeyRequested", result.hardwareKeyRequested);
+            response.putBoolean("tlsCompatible", result.tlsCompatible);
+
+            if (result.keystorePath != null) {
+                com.facebook.react.bridge.WritableMap keystoreDescriptor = com.facebook.react.bridge.Arguments.createMap();
+                keystoreDescriptor.putString("path", result.keystorePath);
+                // KEYSTORE_PASSWORD is always empty (see its declaration for the security
+                // rationale) and is expected to remain so. If this ever becomes non-empty,
+                // it would cross the RN bridge as a plain string, visible to bridge/crash
+                // logs - do not add a real secret here without revisiting that exposure.
+                keystoreDescriptor.putString("password", new String(KEYSTORE_PASSWORD));
+                keystoreDescriptor.putString("format", "pkcs12");
+                response.putMap("keystore", keystoreDescriptor);
+            }
+
+            promise.resolve(response);
+        } catch (CSRRejectedException e) {
+            promise.reject(e.code, e.getMessage());
+        } catch (Exception e) {
+            Log.e(MODULE_NAME, e.getMessage(), e);
+            promise.reject("CSR_GENERATION_ERROR", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Core CSR generation logic, decoupled from the RN bridge so it can be unit tested
+     * without a native module runtime (Arguments.createMap() requires a loaded JNI library).
+     */
+    CSRGenerationResult generateCSRInternal(ReadableMap params) throws Exception {
         KeyPair keyPair = null;
         PKCS10CertificationRequest csr = null;
         String currentStep = "initialization";
@@ -539,21 +1003,18 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String privateKeyAlias = params.hasKey("privateKeyAlias") ? params.getString("privateKeyAlias") : null;
 
             // Validate required parameters
-            if (privateKeyAlias == null || privateKeyAlias.trim().isEmpty()) {
-                promise.reject("MISSING_ALIAS", "privateKeyAlias is required");
-                return;
+            if (!isValidAlias(privateKeyAlias)) {
+                throw new CSRRejectedException("MISSING_ALIAS", "privateKeyAlias is required");
             }
             privateKeyAlias = privateKeyAlias.trim();
 
-            if (!curve.equals("secp256r1") && !curve.equals("secp384r1") && !curve.equals("secp521r1")) {
-                promise.reject("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1");
-                return;
+            if (!isValidCurve(curve)) {
+                throw new CSRRejectedException("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1");
             }
 
             // Validate IP address
             if (ipAddress != null && !ipAddress.trim().isEmpty() && !isValidIPAddress(ipAddress)) {
-                promise.reject("INVALID_IP", "Invalid IP address format: " + ipAddress);
-                return;
+                throw new CSRRejectedException("INVALID_IP", "Invalid IP address format: " + ipAddress);
             }
 
             // Keys are always allowed to be overwritten for simplicity.
@@ -585,12 +1046,20 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     // About to use software, delete any hardware key with same alias
                     deleteHardwareKeyIfExists(privateKeyAlias);
                 }
+            } catch (KeystoreLocationException e) {
+                // Not a cleanup failure to shrug off: the software keystore could not be reached at
+                // all, so nothing here can tell whether a stale software key survives under this
+                // alias. Continuing would generate a hardware key beside it and hand back a CSR,
+                // leaving a later getPublicKey() free to return the stale software key - the exact
+                // dual-store collision this deletion prevents. Rethrown so the promise rejects.
+                throw e;
             } catch (Exception e) {
                 // Log stale key deletion failure but continue - this is a cleanup operation
-                // and shouldn't block the main operation. deleteSoftwareKeyIfExists() already
-                // swallows exceptions internally, so this only catches deleteHardwareKeyIfExists()
-                // failures (e.g., transient Android Keystore unavailability). For software key
-                // generation, blocking on hardware keystore failures is overly strict.
+                // and shouldn't block the main operation. deleteSoftwareKeyIfExists() swallows
+                // everything except KeystoreLocationException, so this mostly catches
+                // deleteHardwareKeyIfExists() failures (e.g., transient Android Keystore
+                // unavailability). For software key generation, blocking on hardware keystore
+                // failures is overly strict.
                 Log.w(MODULE_NAME, "Failed to delete stale key from opposite keystore (continuing): " +
                       e.getMessage() + ". May cause dual-store collision if key exists.", e);
                 // Continue with key generation instead of rejecting
@@ -677,31 +1146,39 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 pemWriter.writeObject(csr);
             }
 
-            com.facebook.react.bridge.WritableMap response = com.facebook.react.bridge.Arguments.createMap();
-            response.putString("csr", csrWriter.toString());
-            response.putString("privateKeyAlias", privateKeyAlias);
-            response.putString("publicKey", Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP));
-            response.putBoolean("isHardwareBacked", useHardwareKey && isHardwareBacked(privateKeyAlias));
-            response.putBoolean("useHardwareKey", useHardwareKey);
-            response.putBoolean("hardwareKeyRequested", requestedHardwareKey);
-            response.putBoolean("tlsCompatible", canUseHardwareKeysForTLS());
+            String keystorePath = useHardwareKey ? null : getKeystoreFile().getAbsolutePath();
 
             Log.d(MODULE_NAME, "CSR generated successfully (requested: " +
                   (requestedHardwareKey ? "hardware" : "software") +
                   ", actual: " + (useHardwareKey ? "hardware" : "software") + ")");
-            promise.resolve(response);
 
+            return CSRGenerationResult.builder(
+                    csrWriter.toString(),
+                    privateKeyAlias,
+                    Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP))
+                    .isHardwareBacked(useHardwareKey && isHardwareBacked(privateKeyAlias))
+                    .useHardwareKey(useHardwareKey)
+                    .hardwareKeyRequested(requestedHardwareKey)
+                    .tlsCompatible(canUseHardwareKeysForTLS())
+                    .keystorePath(keystorePath)
+                    .build();
+
+        } catch (CSRRejectedException e) {
+            throw e;
+        } catch (KeystoreLocationException e) {
+            // Keep the type. Storage failed, not key generation, and the rewrap below would flatten
+            // that into a plain Exception whose message says "key generation failed" - misdirecting
+            // whoever reads the log and stopping any caller from telling the two apart.
+            throw e;
         } catch (Exception e) {
             // Provide better error context
             String errorContext = "CSR generation failed at step: " + currentStep;
-            if (keyPair == null) {
+            if (keyPair == null && "key generation".equals(currentStep)) {
                 errorContext += " (key generation failed)";
-            } else if (csr == null) {
+            } else if (keyPair != null && csr == null) {
                 errorContext += " (CSR signing failed)";
             }
-
-            Log.e(MODULE_NAME, errorContext, e);
-            promise.reject("CSR_GENERATION_ERROR", errorContext + ": " + e.getMessage(), e);
+            throw new Exception(errorContext + ": " + e.getMessage(), e);
         }
     }
 
@@ -877,6 +1354,18 @@ public class CSRModule extends ReactContextBaseJavaModule {
                         deleted = true;
                         Log.d(MODULE_NAME, "Deleted software key: " + privateKeyAlias);
                     }
+                } catch (KeystoreLocationException e) {
+                    // A delete that could not even reach the keystore must not resolve true/false:
+                    // either answer tells the app the alias is clear when a software key may still
+                    // hold it. Rejecting stays correct when the hardware key above was already
+                    // deleted - the software key is the one that would collide later - so the
+                    // partial success is reported in the message rather than swallowed.
+                    if (!deleted) {
+                        throw e;
+                    }
+                    throw new KeystoreLocationException(
+                            "hardware key was deleted, but the software keystore was unreachable: "
+                                    + e.getMessage(), e);
                 } catch (Exception e) {
                     Log.w(MODULE_NAME, "Error accessing software keystore: " + e.getMessage());
                 }
@@ -889,30 +1378,63 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
+    /** Plain-Java result of a capability check, decoupled from the RN bridge's WritableMap. */
+    static class HardwareCapabilities {
+        final boolean tlsCompatible;
+        final int androidSdkVersion;
+        final boolean hasStrongBox;
+        final String manufacturer;
+        final String model;
+        final String device;
+
+        HardwareCapabilities(boolean tlsCompatible, int androidSdkVersion, boolean hasStrongBox,
+                              String manufacturer, String model, String device) {
+            this.tlsCompatible = tlsCompatible;
+            this.androidSdkVersion = androidSdkVersion;
+            this.hasStrongBox = hasStrongBox;
+            this.manufacturer = manufacturer;
+            this.model = model;
+            this.device = device;
+        }
+    }
+
     @ReactMethod
     public void getHardwareKeystoreCapabilities(Promise promise) {
         try {
+            HardwareCapabilities result = getHardwareKeystoreCapabilitiesInternal();
+
             com.facebook.react.bridge.WritableMap capabilities = com.facebook.react.bridge.Arguments.createMap();
-
-            boolean tlsCompatible = canUseHardwareKeysForTLS();
-            capabilities.putBoolean("tlsCompatible", tlsCompatible);
-            capabilities.putInt("androidSdkVersion", android.os.Build.VERSION.SDK_INT);
-
-            boolean hasStrongBox = false;
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                hasStrongBox = getReactApplicationContext().getPackageManager()
-                        .hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE);
-            }
-            capabilities.putBoolean("hasStrongBox", hasStrongBox);
-
-            capabilities.putString("manufacturer", android.os.Build.MANUFACTURER);
-            capabilities.putString("model", android.os.Build.MODEL);
-            capabilities.putString("device", android.os.Build.DEVICE);
+            capabilities.putBoolean("tlsCompatible", result.tlsCompatible);
+            capabilities.putInt("androidSdkVersion", result.androidSdkVersion);
+            capabilities.putBoolean("hasStrongBox", result.hasStrongBox);
+            capabilities.putString("manufacturer", result.manufacturer);
+            capabilities.putString("model", result.model);
+            capabilities.putString("device", result.device);
 
             promise.resolve(capabilities);
         } catch (Exception e) {
             promise.reject("CAPABILITY_CHECK_ERROR", "Failed to check capabilities: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Core capability-check logic, decoupled from the RN bridge so it can be unit tested
+     * without a native module runtime (Arguments.createMap() requires a loaded JNI library).
+     */
+    HardwareCapabilities getHardwareKeystoreCapabilitiesInternal() {
+        boolean hasStrongBox = false;
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            hasStrongBox = getReactApplicationContext().getPackageManager()
+                    .hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE);
+        }
+
+        return new HardwareCapabilities(
+                canUseHardwareKeysForTLS(),
+                android.os.Build.VERSION.SDK_INT,
+                hasStrongBox,
+                android.os.Build.MANUFACTURER,
+                android.os.Build.MODEL,
+                android.os.Build.DEVICE);
     }
 
     @ReactMethod
@@ -935,6 +1457,8 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 try {
                     KeyStore softwareKeyStore = loadSoftwareKeyStore();
                     promise.resolve(softwareKeyStore.containsAlias(privateKeyAlias));
+                } catch (KeystoreLocationException e) {
+                    throw e; // "storage is broken" must not be reported as "key does not exist"
                 } catch (Exception e) {
                     // loadSoftwareKeyStore() handles corruption internally; unexpected errors return false
                     Log.w(MODULE_NAME, "Error checking software keystore: " + e.getMessage());
@@ -982,6 +1506,8 @@ public class CSRModule extends ReactContextBaseJavaModule {
                             return;
                         }
                     }
+                } catch (KeystoreLocationException e) {
+                    throw e; // "storage is broken" must not be reported as "key does not exist"
                 } catch (Exception e) {
                     // loadSoftwareKeyStore() handles corruption internally; unexpected errors here are retrieval failures
                     Log.w(MODULE_NAME, "Error retrieving key from software keystore: " + e.getMessage());
@@ -1042,6 +1568,12 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     saveSoftwareKeyStore(softwareKeyStore);
                     Log.d(MODULE_NAME, "Deleted stale software key: " + privateKeyAlias);
                 }
+            } catch (KeystoreLocationException e) {
+                // Same reason the three @ReactMethod entry points rethrow: "storage is broken" must
+                // not look like "no stale key here". This method exists to stop a stale software key
+                // from colliding with a new hardware key under the same alias, and it cannot know
+                // whether one is there if it never reached the keystore.
+                throw e;
             } catch (Exception e) {
                 // loadSoftwareKeyStore() handles corruption internally; log unexpected errors
                 Log.w(MODULE_NAME, "Error deleting stale software key: " + e.getMessage());
@@ -1049,39 +1581,54 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
+    /** Timestamp for a quarantine filename; see {@link #CORRUPTED_INFIX} for the format contract. */
+    private static String quarantineTimestamp() {
+        return new java.text.SimpleDateFormat("yyyyMMdd_HHmmssSSS", java.util.Locale.US)
+                .format(new java.util.Date());
+    }
+
     /**
-     * Clean up old .corrupted files to prevent unbounded accumulation.
-     * Keeps only the most recent 3 corrupted files for forensics.
+     * Clean up old quarantined keystores to prevent unbounded accumulation.
+     * Keeps only the most recent 3 for forensics.
      *
-     * @param directory The directory containing the files
+     * Recency is read from the filename, not from lastModified(). The quarantine name embeds a
+     * fixed-width zero-padded "yyyyMMdd_HHmmssSSS" stamp after a constant prefix, so a descending
+     * lexicographic sort is exactly a descending chronological sort - and unlike lastModified() it
+     * does not degrade on filesystems that report modification times at one- or two-second
+     * resolution, where the ranking of files quarantined within the same second would be arbitrary.
+     *
+     * @param directory The keystore_forensics directory containing the quarantined files
      * @param baseFileName The base filename (e.g., "software_keys.p12")
+     * @param infix {@link #CORRUPTED_INFIX} or {@link #SUPERSEDED_INFIX}. The two are capped
+     *        independently: they record different events, so a run of corruptions should not evict
+     *        the record of a superseded key or vice versa.
      */
-    private void cleanupCorruptedFiles(File directory, String baseFileName) {
+    private void cleanupQuarantinedFiles(File directory, String baseFileName, String infix) {
         try {
-            // Find all .corrupted files for this keystore
-            File[] corruptedFiles = directory.listFiles((dir, name) ->
-                name.startsWith(baseFileName + ".corrupted.")
+            // Find all quarantined files of this kind for this keystore
+            File[] quarantined = directory.listFiles((dir, name) ->
+                name.startsWith(baseFileName + infix)
             );
 
-            if (corruptedFiles == null || corruptedFiles.length <= 3) {
+            if (quarantined == null || quarantined.length <= 3) {
                 return; // Nothing to clean up
             }
 
-            // Sort by last modified time (newest first)
-            java.util.Arrays.sort(corruptedFiles, (a, b) ->
-                Long.compare(b.lastModified(), a.lastModified())
+            // Sort by embedded timestamp, newest first
+            java.util.Arrays.sort(quarantined, (a, b) ->
+                b.getName().compareTo(a.getName())
             );
 
             // Delete all but the 3 most recent
             int deleted = 0;
-            for (int i = 3; i < corruptedFiles.length; i++) {
-                if (corruptedFiles[i].delete()) {
+            for (int i = 3; i < quarantined.length; i++) {
+                if (quarantined[i].delete()) {
                     deleted++;
                 }
             }
 
             if (deleted > 0) {
-                Log.d(MODULE_NAME, "Cleaned up " + deleted + " old corrupted keystore file(s)");
+                Log.d(MODULE_NAME, "Cleaned up " + deleted + " old quarantined keystore file(s)");
             }
         } catch (Exception e) {
             // Non-critical operation - log but don't throw

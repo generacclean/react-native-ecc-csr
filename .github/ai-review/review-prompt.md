@@ -18,9 +18,9 @@ You are performing an automated code review on a React Native native module libr
 
 1. **Correctness & potential bugs** — Edge cases in cryptographic operations, null/undefined handling, memory leaks, resource cleanup (especially native keystore operations), threading issues, certificate generation errors, key management bugs, ECC curve parameter validation.
 
-2. **Security** — Private key protection (Android Keystore vs software keystore), encryption at rest (EncryptedFile usage), key extraction vulnerabilities, backup exclusion configuration, hardware vs software keystore decision logic, ProGuard/R8 rules for BouncyCastle, certificate validation, subject DN field validation, TLS compatibility checks.
+2. **Security** — Private key protection (Android Keystore vs software keystore), at-rest protection of the software keystore (app-private no-backup storage plus mode 0600, not application-layer encryption), key extraction vulnerabilities, backup exclusion, hardware vs software keystore decision logic, ProGuard/R8 rules for BouncyCastle, certificate validation, subject DN field validation, TLS compatibility checks.
 
-3. **Keystore management** — Hardware keystore detection and fallback, Android 12+ TLS compatibility (`PURPOSE_AGREE_KEY`), BouncyCastle provider registration (removing system BC provider), software keystore encryption with AES256-GCM, file permissions (mode 0600), key alias uniqueness, key deletion cleanup.
+3. **Keystore management** — Hardware keystore detection and fallback, Android 12+ TLS compatibility (`PURPOSE_AGREE_KEY`), BouncyCastle provider registration (removing system BC provider), software keystore location (`getNoBackupFilesDir()`) and legacy migration, file permissions (mode 0600), key alias uniqueness, key deletion cleanup.
 
 4. **Native module patterns** — Proper iOS/Android native bridge patterns, promise/callback handling, error propagation from native to JS, lifecycle management, resource disposal in native code.
 
@@ -39,12 +39,12 @@ You are performing an automated code review on a React Native native module libr
 The module must intelligently decide between hardware and software keystores:
 - **Hardware keystore requirements**: Android 12+ (API 31) for TLS/ECDH support (`PURPOSE_AGREE_KEY`)
 - **Software keystore fallback**: Android 11 and below automatically use software keystore with warning
-- **Encryption at rest**: Software keys must use `EncryptedFile` with AES256-GCM (v1.2.0+)
+- **At-rest protection**: Software keys live in a plain PKCS12 file inside `getNoBackupFilesDir()` at mode 0600. Application-layer encryption (`EncryptedFile`/Tink) was tried in v1.2.0 and removed in v1.3.0 — a stale Tink keyset after reinstall caused endless key regeneration. Do NOT flag the absence of `EncryptedFile`, of a keystore passphrase, or of `backup_rules.xml`; see the SECURITY RATIONALE comment on `KEYSTORE_PASSWORD` in `CSRModule.java`.
 - **TLS compatibility**: `tlsCompatible` flag must accurately reflect device capabilities
 
 Flag any:
 - Hardware keystore usage on Android <12 without fallback
-- Software keystore without encryption
+- Software keystore written outside `getNoBackupFilesDir()`, or a fallback to a backup-eligible path when that directory is unavailable
 - Missing TLS compatibility checks
 - Incorrect `PURPOSE_AGREE_KEY` handling
 
@@ -64,11 +64,12 @@ Flag any:
 
 ### Critical: Key Security
 
-**Software keys (v1.2.0+)**:
-- Must use `EncryptedFile` from AndroidX Security
-- Encryption key stored in Android Keystore (hardware-backed)
+**Software keys (v1.4.0+)**:
+- PKCS12 file with an empty password, kept in `getNoBackupFilesDir()`
 - File permissions set to 0600
-- Excluded from backups via `backup_rules.xml`
+- Excluded from backups by living in the OS's no-backup directory, which Android honours unconditionally. The library ships no `backup_rules.xml` / `data_extraction_rules.xml`: `android:fullBackupContent` and `android:dataExtractionRules` take a single resource each and nothing merges them, so any other dependency claiming those attributes silently disabled the exclusions.
+- Quarantined (`.corrupted.*`, `.superseded.*`) copies are complete private keys and must stay inside the no-backup directory too
+- Legacy copies in `getFilesDir()` are migrated on first access; a migration that cannot complete must fail loudly rather than hand back a path with no key at it
 
 **Hardware keys**:
 - Stored in Android Keystore with `setIsStrongBoxBacked()` when available
@@ -76,8 +77,7 @@ Flag any:
 - Cannot be exported
 
 Flag any:
-- Software keys without encryption
-- Missing backup exclusion rules
+- Private key material written anywhere other than the no-backup directory
 - Incorrect file permissions
 - Hardware keys without proper purpose flags
 - Key material exposure in logs or errors
@@ -107,7 +107,7 @@ Rate each candidate issue 0-100 for confidence + impact:
 - Post ONE top-level **summary** via `gh pr comment` containing: overview of changes, issues found grouped by severity, overall assessment. If nothing meets the bar, say **NO ISSUES FOUND**.
 - Begin the summary with: `_🤖 AI code review. A human code-owner approval is still required to merge._`
 - Do NOT duplicate still-open inline comments. On re-reviews (new commits), skip already-addressed issues and focus only on newly introduced code.
-- Give reasoning for every comment and reference specific patterns when relevant (e.g., "This software keystore lacks EncryptedFile wrapper - see v1.2.0 encryption requirements").
+- Give reasoning for every comment and reference specific patterns when relevant (e.g., "This writes the PKCS12 file to `getFilesDir()`, which is backup-eligible - see the no-backup storage requirement above").
 - Only communicate through GitHub comments — do not emit the review as chat/log messages.
 - Be concise but specific - cite line numbers, function names, and actual code patterns.
 
