@@ -12,7 +12,7 @@ A React Native module for generating Certificate Signing Requests (CSR) with Ell
 
 **Backup Exclusion (Android):** No configuration required. Android never includes `getNoBackupFilesDir()` in Auto Backup, cloud backup, or device-to-device transfer, so the private key cannot leave the device through backup infrastructure no matter what your app sets for `android:allowBackup`, `android:fullBackupContent`, or `android:dataExtractionRules`.
 
-**iOS is different — do not read the guarantee above as cross-platform.** iOS keys live in the Keychain, not in a file, so none of the directory or manifest discussion applies. `ios/CSRModule.m` adds Keychain items without an explicit `kSecAttrAccessible` value, which means they default to `kSecAttrAccessibleWhenUnlocked` — and an *encrypted* iTunes/Finder backup **does** include items with that accessibility. Only the `…ThisDeviceOnly` variants are excluded. Secure Enclave keys (`useHardwareKey: true`) are non-exportable regardless. Treat a software-backed iOS key as backup-eligible until this module sets `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
+**iOS is different — do not read the guarantee above as cross-platform.** iOS keys live in the Keychain, not in a file, so none of the directory or manifest discussion applies. `ios/CSRCore.m` adds Keychain items without an explicit `kSecAttrAccessible` value, which means they default to `kSecAttrAccessibleWhenUnlocked` — and an *encrypted* iTunes/Finder backup **does** include items with that accessibility. Only the `…ThisDeviceOnly` variants are excluded. Secure Enclave keys (`useHardwareKey: true`) are non-exportable regardless. Treat a software-backed iOS key as backup-eligible until this module sets `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
 
 Earlier versions shipped `backup_rules.xml` and `data_extraction_rules.xml` for the consuming app to reference from its manifest. Those files have been **removed** — the approach could not be made reliable, because `android:fullBackupContent` and `android:dataExtractionRules` each accept exactly one resource reference and nothing merges them. Any other library that claimed either attribute (`expo-secure-store`, for example) silently deactivated this module's exclusions. If your manifest or config plugin still references `@xml/backup_rules` or `@xml/data_extraction_rules` from this package, remove those references; nothing else is needed in their place.
 
@@ -316,9 +316,24 @@ const result: CSRResult = await CSRModule.generateCSR(params);
 
 ## Requirements
 
-- React Native >= 0.60
-- Android SDK >= 21
+- An app using Expo Modules (Expo SDK >= 55, React Native >= 0.83). This is an
+  [Expo Module](https://docs.expo.dev/modules/overview/), linked by Expo autolinking; bare React
+  Native apps need [`expo` installed](https://docs.expo.dev/bare/installing-expo-modules/) first.
+- Android minSdk 23, iOS 15.1
 - BouncyCastle library (included)
+
+## Architecture
+
+Each platform has an RN/Expo-free core that holds all behaviour, and a thin Expo module that
+exposes it to JS as `CSRModule`:
+
+| | Core (all logic, error codes, response shape) | Expo module (argument/promise adapter) |
+|---|---|---|
+| Android | `android/src/main/java/com/ecccsr/CSRCore.java` | `android/src/main/java/com/ecccsr/CSRModule.kt` |
+| iOS | `ios/CSRCore.m` | `ios/CSRModule.swift` |
+
+Both Expo modules run their calls on a dedicated serial queue rather than Expo's shared one, so a
+slow key generation cannot stall other modules' async calls.
 
 ## Dependencies
 
@@ -329,12 +344,10 @@ const result: CSRResult = await CSRModule.generateCSR(params);
 
 These are automatically included by the module as transitive dependencies.
 
-**React Native compile version:** this module compiles against exactly
-`com.facebook.react:react-android:0.76.0` (`compileOnly`), pinned so `./gradlew test` works
-standalone outside a consuming app. The app supplies its own React Native version at
-runtime, which is fine while the bridge API this module uses (`Promise`,
-`ReactApplicationContext`, `ReadableMap`, `WritableMap`) stays stable. Bump the pin in
-`android/build.gradle` deliberately - notably for the Turbo Modules migration (IA-5752).
+**No React Native compile dependency:** `CSRCore` uses only Android and BouncyCastle APIs. The
+Kotlin Expo glue gets `expo-modules-core` from the consuming app, so `android/build.gradle` only
+compiles it when an `:expo-modules-core` project exists. Standalone builds (`./gradlew test`, CI)
+skip the glue and build and test `CSRCore` on its own.
 
 ## Testing
 
@@ -354,7 +367,7 @@ silently drops every Robolectric test down to its API 16 floor — seven levels 
 `minSdk 23`. Platform APIs newer than 16 then fail at runtime with `NoSuchMethodError` despite
 compiling cleanly. Tests that need a specific level still override `Build.VERSION.SDK_INT` locally.
 
-**iOS has no automated test coverage.** `ios/CSRModule.m` carries the other half of this
+**iOS has no automated test coverage.** `ios/CSRCore.m` carries the other half of this
 module and is verified manually only, so a CSR-format regression on iOS would not be caught
 by CI. Exercise iOS changes against a real device or simulator before release.
 

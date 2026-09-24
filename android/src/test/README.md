@@ -1,21 +1,23 @@
 # Unit Tests for react-native-ecc-csr
 
-This directory contains unit tests for the Android native module.
+This directory contains unit tests for `CSRCore`, the Android implementation. The Expo module
+(`CSRModule.kt`) only adapts arguments and promises onto it, and is not compiled in standalone
+builds - see the comment at the top of `android/build.gradle`.
 
 ## Test Structure
 
 ```
 android/src/test/java/com/ecccsr/
 ├── BouncyCastleProviderTest.java  - Tests BC provider initialization
-├── InputValidationTest.java       - Tests input validation logic (delegates to CSRModule)
+├── InputValidationTest.java       - Tests input validation logic (delegates to CSRCore)
 ├── CSRFormatTest.java             - Tests CSR format and X500 names
-├── CSRModuleTest.java             - Tests CSRModule directly: CSR generation, key lifecycle,
+├── CSRCoreTest.java               - Tests CSRCore directly: CSR generation, key lifecycle,
 │                                    keystore round-trip, corruption recovery, capabilities
 └── testutil/
-    ├── FakeReactApplicationContext.java - Minimal ReactApplicationContext for Robolectric tests,
-    │                                      with hooks to make no-backup storage unavailable or
-    │                                      unwritable (see "Simulating storage failures")
-    └── RecordingPromise.java            - Captures resolve/reject calls for assertions
+    ├── FakeContext.java           - ContextWrapper over the Robolectric application, with hooks
+    │                                to make no-backup storage unavailable or unwritable
+    │                                (see "Simulating storage failures")
+    └── RecordingPromise.java      - CSRCore.Reply that captures resolve/reject for assertions
 ```
 
 ## Running Tests
@@ -80,11 +82,9 @@ Tests CSR format handling:
 - Unicode handling
 - Filename sanitization
 
-### CSRModuleTest
-Tests `CSRModule` directly via Robolectric, exercising real production code
-(the same logic the `@ReactMethod` entry points call, minus the RN bridge's
-`WritableMap` serialization step, which needs a native JNI library unavailable
-in this JVM-only test environment):
+### CSRCoreTest
+Tests `CSRCore` directly via Robolectric, exercising the same entry points the Expo module calls,
+including the response maps it hands to JS:
 - CSR generation for P-256/P-384/P-521 with a parseable, correctly-signed CSR
 - Key lifecycle: create → keyExists → getPublicKey → deleteKey → keyExists
 - Software keystore round-trip: write then reload the PKCS12 file
@@ -109,7 +109,7 @@ in this JVM-only test environment):
 
 #### Simulating storage failures
 
-The two hooks on `FakeReactApplicationContext` are what make the no-backup storage tests
+The two hooks on `FakeContext` are what make the no-backup storage tests
 assertions rather than skips:
 
 - `setNoBackupFilesDirUnavailable(true)` — `getNoBackupFilesDir()` returns null, the platform's
@@ -121,7 +121,7 @@ assertions rather than skips:
   `assumeTrue`-skips) on containerised CI runners without ever exercising the failure path — and
   the failure path is the headline behaviour of this change.
 
-Tests that assert a rejection assert on `CSRModule.KeystoreLocationException` specifically, not on
+Tests that assert a rejection assert on `CSRCore.KeystoreLocationException` specifically, not on
 `Exception`. Under Robolectric the hardware keystore is absent, so almost any hardware-path call
 throws *something*; only the exception type distinguishes "storage is broken, we stopped" from
 "this environment has no AndroidKeyStore".
@@ -130,20 +130,18 @@ throws *something*; only the exception type distinguishes "storage is broken, we
 
 Tests use:
 - **JUnit 4.13.2** - Test framework
-- **Mockito 5.3.1** - Mocking framework, used by `CSRModuleTest` to `mockStatic` the
-  RN `Arguments` factory, which otherwise needs a native JNI library
-- **Robolectric 4.10.3** - Android framework simulation, used by `CSRModuleTest`
-  and `InputValidationTest` to instantiate `CSRModule` with a fake
-  `ReactApplicationContext` (see `testutil/FakeReactApplicationContext.java`)
+- **Robolectric 4.10.3** - Android framework simulation, used by `CSRCoreTest`
+  and `InputValidationTest` to instantiate `CSRCore` over a real application
+  `Context` (see `testutil/FakeContext.java`)
 
 ## What's NOT Tested (Requires Hardware/Emulator)
 
 Key generation, PKCS12 keystore round-trips, and corruption recovery now run
-as JVM unit tests via Robolectric (see `CSRModuleTest`). What's still out of
+as JVM unit tests via Robolectric (see `CSRCoreTest`). What's still out of
 scope for this suite and requires a full Android environment:
 - Actual Android Keystore (hardware-backed) key generation and StrongBox
-- React Native bridge serialization (`Arguments.createMap()` / `WritableNativeMap`,
-  which require a native JNI library not available in a JVM-only test run)
+- The Expo module (`CSRModule.kt`): argument conversion, promise settlement, and its dedicated
+  executor. It needs `expo-modules-core`, which only exists inside a consuming app
 - Concurrent operations under real thread scheduling
 
 For these, see: `/TESTING_GUIDE.md`
@@ -203,7 +201,7 @@ public class MyNewTest {
 These tests are designed to run in CI without requiring:
 - Android emulator
 - Physical device
-- React Native runtime
+- React Native or Expo runtime
 - Full Android SDK (just JDK needed)
 
 Perfect for GitHub Actions, Jenkins, etc.
@@ -213,28 +211,27 @@ Perfect for GitHub Actions, Jenkins, etc.
 | Component | Coverage | Status |
 |-----------|----------|--------|
 | BC Provider Init | ~60% | ✅ Good |
-| Input Validation | ~80% | ✅ Excellent (delegates to production `CSRModule` methods) |
+| Input Validation | ~80% | ✅ Excellent (delegates to production `CSRCore` methods) |
 | CSR Format | ~40% | ⚠️ Basic |
-| Key Generation (software) | ✅ Covered | ✅ Good (`CSRModuleTest`, via Robolectric) |
+| Key Generation (software) | ✅ Covered | ✅ Good (`CSRCoreTest`, via Robolectric) |
 | Key Generation (hardware/StrongBox) | 0% | ❌ Needs real-device/emulator tests |
-| Keystore round-trip / corruption recovery | ✅ Covered | ✅ Good (`CSRModuleTest`) |
-| No-backup storage / legacy keystore migration | ✅ Covered | ✅ Good (`CSRModuleTest`) |
+| Keystore round-trip / corruption recovery | ✅ Covered | ✅ Good (`CSRCoreTest`) |
+| No-backup storage / legacy keystore migration | ✅ Covered | ✅ Good (`CSRCoreTest`) |
 | Concurrency | 0% | ❌ Needs integration tests |
 
 Robolectric tests run at API 33, pinned in `resources/robolectric.properties` and dependent on
 `testOptions.unitTests.includeAndroidResources` in `android/build.gradle`. Removing either drops
 Robolectric into legacy resources mode and back to its API 16 floor, where it skips or fails
-anything using a platform API newer than API 16. `AndroidManifest.xml` in this directory exists only
-to override react-android's `minSdkVersion 24` for the test variant; it is not published.
+anything using a platform API newer than API 16.
 
 ## Next Steps
 
-Mockito and Robolectric coverage of `CSRModule` and a blocking CI pipeline
+Robolectric coverage of `CSRCore` and a blocking CI pipeline
 (`.github/workflows/android-tests.yml`) are in place. What's left:
 
 1. **Add instrumented tests** in a separate directory for the hardware-keystore paths
    listed under "What's NOT Tested" above
-2. **Add iOS test coverage** — `ios/CSRModule.m` is verified manually only
+2. **Add iOS test coverage** — `ios/CSRCore.m` is verified manually only
 
 ## Troubleshooting
 
@@ -257,7 +254,7 @@ cd android
 
 ### JVM version issues
 ```bash
-# Check Java version (needs 8+)
+# Check Java version (needs 17+)
 java -version
 
 # Set JAVA_HOME if needed
@@ -267,6 +264,5 @@ export JAVA_HOME=/path/to/jdk
 ## Resources
 
 - [JUnit 4 Documentation](https://junit.org/junit4/)
-- [Mockito Documentation](https://site.mockito.org/)
 - [Robolectric Documentation](http://robolectric.org/)
 - [Android Testing Guide](https://developer.android.com/training/testing)

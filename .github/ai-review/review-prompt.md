@@ -39,7 +39,7 @@ You are performing an automated code review on a React Native native module libr
 The module must intelligently decide between hardware and software keystores:
 - **Hardware keystore requirements**: Android 12+ (API 31) for TLS/ECDH support (`PURPOSE_AGREE_KEY`)
 - **Software keystore fallback**: Android 11 and below automatically use software keystore with warning
-- **At-rest protection**: Software keys live in a plain PKCS12 file inside `getNoBackupFilesDir()` at mode 0600. Application-layer encryption (`EncryptedFile`/Tink) was tried in v1.2.0 and removed in v1.3.0 — a stale Tink keyset after reinstall caused endless key regeneration. Do NOT flag the absence of `EncryptedFile`, of a keystore passphrase, or of `backup_rules.xml`; see the SECURITY RATIONALE comment on `KEYSTORE_PASSWORD` in `CSRModule.java`.
+- **At-rest protection**: Software keys live in a plain PKCS12 file inside `getNoBackupFilesDir()` at mode 0600. Application-layer encryption (`EncryptedFile`/Tink) was tried in v1.2.0 and removed in v1.3.0 — a stale Tink keyset after reinstall caused endless key regeneration. Do NOT flag the absence of `EncryptedFile`, of a keystore passphrase, or of `backup_rules.xml`; see the SECURITY RATIONALE comment on `KEYSTORE_PASSWORD` in `CSRCore.java`.
 - **TLS compatibility**: `tlsCompatible` flag must accurately reflect device capabilities
 
 Flag any:

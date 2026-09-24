@@ -10,11 +10,6 @@ import android.util.Log;
 
 // Removed EncryptedFile/MasterKey imports - using plain PKCS12 with OS-level security instead
 
-import com.facebook.react.bridge.Promise;
-import com.facebook.react.bridge.ReactApplicationContext;
-import com.facebook.react.bridge.ReactContextBaseJavaModule;
-import com.facebook.react.bridge.ReactMethod;
-import com.facebook.react.bridge.ReadableMap;
 
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -51,12 +46,39 @@ import java.security.cert.X509Certificate;
 import java.security.spec.ECGenParameterSpec;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
-public class CSRModule extends ReactContextBaseJavaModule {
+/**
+ * ECC key pair and CSR generation, with no dependency on React Native or Expo.
+ *
+ * The JS-facing module is the Expo module in {@code CSRModule.kt}, which only adapts arguments and
+ * promises. Everything that decides behaviour - validation, key storage, error codes, response
+ * shape - lives here so it stays unit-testable on a plain Robolectric {@link Context}.
+ */
+public class CSRCore {
 
+    /**
+     * Where an entry point reports its outcome. Implemented by the Expo module over its promise,
+     * and by tests to capture the outcome synchronously.
+     *
+     * Each entry point calls exactly one of these exactly once. The codes passed to reject are
+     * part of the JS contract (callers match on {@code error.code}), so treat them as API.
+     */
+    public interface Reply {
+        void resolve(Object value);
+
+        void reject(String code, String message, Throwable cause);
+
+        default void reject(String code, String message) {
+            reject(code, message, null);
+        }
+    }
+
+    /** Log tag. Kept as the pre-Expo module name so existing logcat filters keep working. */
     private static final String MODULE_NAME = "CSRModule";
     private static final String ANDROID_KEYSTORE = "AndroidKeyStore";
 
@@ -182,7 +204,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      *         quiet alternatives put private key material somewhere the caller does not expect.
      */
     File getKeystoreDir() throws IOException {
-        File noBackupDir = getReactApplicationContext().getNoBackupFilesDir();
+        File noBackupDir = context.getNoBackupFilesDir();
         if (noBackupDir == null) {
             // new File((File) null, name) is legal Java and yields the bare relative path
             // "software_keys.p12", resolved against the process working directory - outside the
@@ -206,7 +228,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      *
      * Every method that catches broadly around a keystore access rethrows this type ahead of its
      * generic clause - keyExists, getPublicKey, deleteKey, deleteSoftwareKeyIfExists and
-     * generateCSRInternal - so it reaches the bridge and the promise rejects. Adding a new such
+     * generateCSRInternal - so it reaches the entry point and the promise rejects. Adding a new such
      * catch without that clause is what turns this back into a log line.
      */
     static class KeystoreLocationException extends IOException {
@@ -236,7 +258,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
      *         quarantined copies are best-effort.
      */
     private void migrateLegacyKeystoreIfNeeded(File noBackupDir) throws IOException {
-        File legacyDir = getReactApplicationContext().getFilesDir();
+        File legacyDir = context.getFilesDir();
         if (legacyDir == null || legacyDir.equals(noBackupDir)) {
             return;
         }
@@ -567,14 +589,16 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
     // Removed MasterKey caching - no longer using EncryptedFile/Tink
 
-    public CSRModule(ReactApplicationContext reactContext) {
-        super(reactContext);
+    private final Context context;
+
+    public CSRCore(Context context) {
+        this.context = context;
         ensureBouncyCastleProvider();
         // No longer need stale encryption cleanup - using plain PKCS12 files
     }
 
     // Simplified BC provider initialization logic
-    private void ensureBouncyCastleProvider() {
+    private static void ensureBouncyCastleProvider() {
         // Fast path - if already initialized, return immediately
         if (providerInitialized) {
             return;
@@ -634,11 +658,6 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 Log.i(MODULE_NAME, "BouncyCastle provider registered (v" + FULL_BC_PROVIDER.getVersion() + ")");
             }
         }
-    }
-
-    @Override
-    public String getName() {
-        return MODULE_NAME;
     }
 
     /**
@@ -868,7 +887,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
-    /** Plain-Java result of a CSR generation, decoupled from the RN bridge's WritableMap. */
+    /** Typed result of a CSR generation; {@link #generateCSR} maps it for JS. */
     static class CSRGenerationResult {
         final String csr;
         final String privateKeyAlias;
@@ -942,30 +961,29 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
-    @ReactMethod
-    public void generateCSR(ReadableMap params, Promise promise) {
+    public void generateCSR(Map<String, ?> params, Reply promise) {
         try {
             CSRGenerationResult result = generateCSRInternal(params);
 
-            com.facebook.react.bridge.WritableMap response = com.facebook.react.bridge.Arguments.createMap();
-            response.putString("csr", result.csr);
-            response.putString("privateKeyAlias", result.privateKeyAlias);
-            response.putString("publicKey", result.publicKeyBase64);
-            response.putBoolean("isHardwareBacked", result.isHardwareBacked);
-            response.putBoolean("useHardwareKey", result.useHardwareKey);
-            response.putBoolean("hardwareKeyRequested", result.hardwareKeyRequested);
-            response.putBoolean("tlsCompatible", result.tlsCompatible);
+            Map<String, Object> response = new HashMap<>();
+            response.put("csr", result.csr);
+            response.put("privateKeyAlias", result.privateKeyAlias);
+            response.put("publicKey", result.publicKeyBase64);
+            response.put("isHardwareBacked", result.isHardwareBacked);
+            response.put("useHardwareKey", result.useHardwareKey);
+            response.put("hardwareKeyRequested", result.hardwareKeyRequested);
+            response.put("tlsCompatible", result.tlsCompatible);
 
             if (result.keystorePath != null) {
-                com.facebook.react.bridge.WritableMap keystoreDescriptor = com.facebook.react.bridge.Arguments.createMap();
-                keystoreDescriptor.putString("path", result.keystorePath);
+                Map<String, Object> keystoreDescriptor = new HashMap<>();
+                keystoreDescriptor.put("path", result.keystorePath);
                 // KEYSTORE_PASSWORD is always empty (see its declaration for the security
                 // rationale) and is expected to remain so. If this ever becomes non-empty,
-                // it would cross the RN bridge as a plain string, visible to bridge/crash
-                // logs - do not add a real secret here without revisiting that exposure.
-                keystoreDescriptor.putString("password", new String(KEYSTORE_PASSWORD));
-                keystoreDescriptor.putString("format", "pkcs12");
-                response.putMap("keystore", keystoreDescriptor);
+                // it would cross into JS as a plain string, visible to JS/crash logs - do
+                // not add a real secret here without revisiting that exposure.
+                keystoreDescriptor.put("password", new String(KEYSTORE_PASSWORD));
+                keystoreDescriptor.put("format", "pkcs12");
+                response.put("keystore", keystoreDescriptor);
             }
 
             promise.resolve(response);
@@ -978,10 +996,25 @@ public class CSRModule extends ReactContextBaseJavaModule {
     }
 
     /**
-     * Core CSR generation logic, decoupled from the RN bridge so it can be unit tested
-     * without a native module runtime (Arguments.createMap() requires a loaded JNI library).
+     * Reads an optional string param. A key that is present keeps its value even when that value is
+     * null, and a non-string value throws ClassCastException - both match what ReadableMap's
+     * {@code hasKey ? getString : default} did before the Expo migration, so malformed input still
+     * fails in the same step with the same code.
      */
-    CSRGenerationResult generateCSRInternal(ReadableMap params) throws Exception {
+    private static String optString(Map<String, ?> params, String key, String fallback) {
+        return params.containsKey(key) ? (String) params.get(key) : fallback;
+    }
+
+    /** Boolean counterpart of {@link #optString}; a present null throws, as getBoolean did. */
+    private static boolean optBoolean(Map<String, ?> params, String key, boolean fallback) {
+        return params.containsKey(key) ? (Boolean) params.get(key) : fallback;
+    }
+
+    /**
+     * Core CSR generation logic, separated from {@link #generateCSR} so tests can assert on the
+     * typed result and on the exception type rather than on a reply.
+     */
+    CSRGenerationResult generateCSRInternal(Map<String, ?> params) throws Exception {
         KeyPair keyPair = null;
         PKCS10CertificationRequest csr = null;
         String currentStep = "initialization";
@@ -989,18 +1022,18 @@ public class CSRModule extends ReactContextBaseJavaModule {
         try {
             // Extract and validate parameters
             currentStep = "parameter extraction";
-            String country = sanitizeDNValue(params.hasKey("country") ? params.getString("country") : DEFAULT_COUNTRY);
-            String state = sanitizeDNValue(params.hasKey("state") ? params.getString("state") : DEFAULT_STATE);
-            String locality = sanitizeDNValue(params.hasKey("locality") ? params.getString("locality") : DEFAULT_LOCALITY);
-            String organization = sanitizeDNValue(params.hasKey("organization") ? params.getString("organization") : DEFAULT_ORGANIZATION);
-            String organizationalUnit = sanitizeDNValue(params.hasKey("organizationalUnit") ? params.getString("organizationalUnit") : DEFAULT_ORGANIZATIONAL_UNIT);
-            String commonName = sanitizeDNValue(params.hasKey("commonName") ? params.getString("commonName") : "");
-            String serialNumber = sanitizeDNValue(params.hasKey("serialNumber") ? params.getString("serialNumber") : "");
-            String ipAddress = params.hasKey("ipAddress") ? params.getString("ipAddress") : DEFAULT_IP_ADDRESS;
-            String dnsName = params.hasKey("dnsName") ? params.getString("dnsName") : null;
-            String curve = params.hasKey("curve") ? params.getString("curve") : DEFAULT_ECC_CURVE;
-            String phoneInfo = params.hasKey("phoneInfo") ? params.getString("phoneInfo") : null;
-            String privateKeyAlias = params.hasKey("privateKeyAlias") ? params.getString("privateKeyAlias") : null;
+            String country = sanitizeDNValue(optString(params, "country", DEFAULT_COUNTRY));
+            String state = sanitizeDNValue(optString(params, "state", DEFAULT_STATE));
+            String locality = sanitizeDNValue(optString(params, "locality", DEFAULT_LOCALITY));
+            String organization = sanitizeDNValue(optString(params, "organization", DEFAULT_ORGANIZATION));
+            String organizationalUnit = sanitizeDNValue(optString(params, "organizationalUnit", DEFAULT_ORGANIZATIONAL_UNIT));
+            String commonName = sanitizeDNValue(optString(params, "commonName", ""));
+            String serialNumber = sanitizeDNValue(optString(params, "serialNumber", ""));
+            String ipAddress = optString(params, "ipAddress", DEFAULT_IP_ADDRESS);
+            String dnsName = optString(params, "dnsName", null);
+            String curve = optString(params, "curve", DEFAULT_ECC_CURVE);
+            String phoneInfo = optString(params, "phoneInfo", null);
+            String privateKeyAlias = optString(params, "privateKeyAlias", null);
 
             // Validate required parameters
             if (!isValidAlias(privateKeyAlias)) {
@@ -1021,7 +1054,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
             // If a key with the same alias exists, it will be replaced.
 
             // App can request hardware, but module decides based on TLS compatibility
-            boolean requestedHardwareKey = params.hasKey("useHardwareKey") ? params.getBoolean("useHardwareKey") : false;
+            boolean requestedHardwareKey = optBoolean(params, "useHardwareKey", false);
 
             // Override app preference if hardware won't work for TLS
             boolean useHardwareKey = requestedHardwareKey && canUseHardwareKeysForTLS();
@@ -1189,7 +1222,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         boolean useStrongBox = false;
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-            hasStrongBox = getReactApplicationContext().getPackageManager()
+            hasStrongBox = context.getPackageManager()
                     .hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE);
 
             if (BuildConfig.DEBUG) {
@@ -1300,7 +1333,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         Log.d(MODULE_NAME, "Software key pair generated successfully");
 
         // Thread-safe keystore file operations
-        // Prevents race conditions when multiple React Native threads call generateCSR simultaneously
+        // Prevents race conditions when multiple threads call generateCSR simultaneously
         // All read-modify-write operations on the PKCS12 file must be atomic to prevent corruption
         synchronized (SOFTWARE_KEYSTORE_LOCK) {
             storeSoftwareKey(privateKeyAlias, keyPair);
@@ -1325,8 +1358,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         saveSoftwareKeyStore(softwareKeyStore);
     }
 
-    @ReactMethod
-    public void deleteKey(String privateKeyAlias, Promise promise) {
+    public void deleteKey(String privateKeyAlias, Reply promise) {
         try {
             boolean deleted = false;
 
@@ -1378,7 +1410,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
-    /** Plain-Java result of a capability check, decoupled from the RN bridge's WritableMap. */
+    /** Typed result of a capability check; {@link #getHardwareKeystoreCapabilities} maps it for JS. */
     static class HardwareCapabilities {
         final boolean tlsCompatible;
         final int androidSdkVersion;
@@ -1398,18 +1430,17 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
-    @ReactMethod
-    public void getHardwareKeystoreCapabilities(Promise promise) {
+    public void getHardwareKeystoreCapabilities(Reply promise) {
         try {
             HardwareCapabilities result = getHardwareKeystoreCapabilitiesInternal();
 
-            com.facebook.react.bridge.WritableMap capabilities = com.facebook.react.bridge.Arguments.createMap();
-            capabilities.putBoolean("tlsCompatible", result.tlsCompatible);
-            capabilities.putInt("androidSdkVersion", result.androidSdkVersion);
-            capabilities.putBoolean("hasStrongBox", result.hasStrongBox);
-            capabilities.putString("manufacturer", result.manufacturer);
-            capabilities.putString("model", result.model);
-            capabilities.putString("device", result.device);
+            Map<String, Object> capabilities = new HashMap<>();
+            capabilities.put("tlsCompatible", result.tlsCompatible);
+            capabilities.put("androidSdkVersion", result.androidSdkVersion);
+            capabilities.put("hasStrongBox", result.hasStrongBox);
+            capabilities.put("manufacturer", result.manufacturer);
+            capabilities.put("model", result.model);
+            capabilities.put("device", result.device);
 
             promise.resolve(capabilities);
         } catch (Exception e) {
@@ -1417,14 +1448,11 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
-    /**
-     * Core capability-check logic, decoupled from the RN bridge so it can be unit tested
-     * without a native module runtime (Arguments.createMap() requires a loaded JNI library).
-     */
+    /** Core capability-check logic, separated from {@link #getHardwareKeystoreCapabilities} for tests. */
     HardwareCapabilities getHardwareKeystoreCapabilitiesInternal() {
         boolean hasStrongBox = false;
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-            hasStrongBox = getReactApplicationContext().getPackageManager()
+            hasStrongBox = context.getPackageManager()
                     .hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE);
         }
 
@@ -1437,8 +1465,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
                 android.os.Build.DEVICE);
     }
 
-    @ReactMethod
-    public void keyExists(String privateKeyAlias, Promise promise) {
+    public void keyExists(String privateKeyAlias, Reply promise) {
         try {
             // Check hardware keystore
             try {
@@ -1470,8 +1497,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
-    @ReactMethod
-    public void getPublicKey(String privateKeyAlias, Promise promise) {
+    public void getPublicKey(String privateKeyAlias, Reply promise) {
         try {
             // Try hardware keystore first
             try {
@@ -1569,7 +1595,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     Log.d(MODULE_NAME, "Deleted stale software key: " + privateKeyAlias);
                 }
             } catch (KeystoreLocationException e) {
-                // Same reason the three @ReactMethod entry points rethrow: "storage is broken" must
+                // Same reason the three keystore-reading entry points rethrow: "storage is broken" must
                 // not look like "no stale key here". This method exists to stop a stale software key
                 // from colliding with a new hardware key under the same alias, and it cannot know
                 // whether one is there if it never reached the keystore.

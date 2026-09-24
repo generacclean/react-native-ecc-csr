@@ -1,6 +1,6 @@
 package com.ecccsr;
 
-import com.ecccsr.testutil.FakeReactApplicationContext;
+import com.ecccsr.testutil.FakeContext;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -11,18 +11,18 @@ import org.robolectric.RuntimeEnvironment;
 import static org.junit.Assert.*;
 
 /**
- * Unit tests for input validation. Every assertion delegates to the real CSRModule
+ * Unit tests for input validation. Every assertion delegates to the real CSRCore
  * validator (isValidIPAddress / isValidCurve / isValidAlias / sanitizeDNValue) rather
  * than re-declaring the logic, so these tests fail if production behavior changes.
  */
 @RunWith(RobolectricTestRunner.class)
 public class InputValidationTest {
 
-    private CSRModule module;
+    private CSRCore module;
 
     @Before
     public void setUp() {
-        module = new CSRModule(new FakeReactApplicationContext(RuntimeEnvironment.getApplication()));
+        module = new CSRCore(new FakeContext(RuntimeEnvironment.getApplication()));
     }
 
     private boolean isValidIPAddress(String ip) {

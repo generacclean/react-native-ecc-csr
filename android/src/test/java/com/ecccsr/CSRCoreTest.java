@@ -1,10 +1,7 @@
 package com.ecccsr;
 
-import com.ecccsr.testutil.FakeReactApplicationContext;
+import com.ecccsr.testutil.FakeContext;
 import com.ecccsr.testutil.RecordingPromise;
-import com.facebook.react.bridge.JavaOnlyMap;
-import com.facebook.react.bridge.ReadableMap;
-import com.facebook.react.bridge.WritableMap;
 
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequest;
@@ -24,24 +21,25 @@ import java.security.KeyStore;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.Assert.*;
 
 /**
- * Unit tests for CSRModule that exercise the real production code (via generateCSRInternal /
- * getHardwareKeystoreCapabilitiesInternal, which are the same logic the @ReactMethod entry points
- * call, minus the RN bridge's WritableMap serialization step that requires a native JNI library
- * unavailable in this JVM-only test environment).
+ * Unit tests for CSRCore that exercise the real production code: the entry points the Expo module
+ * calls, and generateCSRInternal / getHardwareKeystoreCapabilitiesInternal where a test needs the
+ * typed result or exception rather than a reply.
  */
 @RunWith(RobolectricTestRunner.class)
-public class CSRModuleTest {
+public class CSRCoreTest {
 
     // Read from production rather than copied, so a rename on either side breaks the build instead
     // of quietly leaving these tests staging files at names production no longer uses.
-    private static final String KEYSTORE_NAME = CSRModule.SOFTWARE_KEYSTORE_FILE;
-    private static final String CORRUPTED_INFIX = CSRModule.CORRUPTED_INFIX;
-    private static final String SUPERSEDED_INFIX = CSRModule.SUPERSEDED_INFIX;
+    private static final String KEYSTORE_NAME = CSRCore.SOFTWARE_KEYSTORE_FILE;
+    private static final String CORRUPTED_INFIX = CSRCore.CORRUPTED_INFIX;
+    private static final String SUPERSEDED_INFIX = CSRCore.SUPERSEDED_INFIX;
     private static final String FORENSICS_DIR = "keystore_forensics";
 
     /** Regular file that stands in for a directory, so anything created under it must fail. */
@@ -53,14 +51,14 @@ public class CSRModuleTest {
     /** Alias of the key written by the post-downgrade re-enrolment in the migration tests. */
     private static final String ROLLED_BACK_ALIAS = "downgrade-reenrolled-alias";
 
-    private CSRModule module;
-    private FakeReactApplicationContext context;
+    private CSRCore module;
+    private FakeContext context;
     private final int originalSdkInt = android.os.Build.VERSION.SDK_INT;
 
     @Before
     public void setUp() {
-        context = new FakeReactApplicationContext(RuntimeEnvironment.getApplication());
-        module = new CSRModule(context);
+        context = new FakeContext(RuntimeEnvironment.getApplication());
+        module = new CSRCore(context);
 
         // Robolectric may hand out the same app directories to more than one test method, so a
         // leftover keystore or quarantined file would let the corruption tests below pass on
@@ -103,12 +101,12 @@ public class CSRModuleTest {
         ReflectionHelpers.setStaticField(android.os.Build.VERSION.class, "SDK_INT", originalSdkInt);
     }
 
-    private JavaOnlyMap paramsFor(String alias, String curve) {
-        JavaOnlyMap params = new JavaOnlyMap();
-        params.putString("commonName", "test-device");
-        params.putString("privateKeyAlias", alias);
+    private Map<String, Object> paramsFor(String alias, String curve) {
+        Map<String, Object> params = new HashMap<>();
+        params.put("commonName", "test-device");
+        params.put("privateKeyAlias", alias);
         if (curve != null) {
-            params.putString("curve", curve);
+            params.put("curve", curve);
         }
         return params;
     }
@@ -117,11 +115,11 @@ public class CSRModuleTest {
 
     @Test
     public void testGenerateCSRForP256ProducesParseableCSRWithExpectedDN() throws Exception {
-        JavaOnlyMap params = paramsFor("alias-p256", "secp256r1");
-        params.putString("country", "US");
-        params.putString("organization", "Generac Power Systems");
+        Map<String, Object> params = paramsFor("alias-p256", "secp256r1");
+        params.put("country", "US");
+        params.put("organization", "Generac Power Systems");
 
-        CSRModule.CSRGenerationResult result = module.generateCSRInternal(params);
+        CSRCore.CSRGenerationResult result = module.generateCSRInternal(params);
 
         PKCS10CertificationRequest csr = parseCSR(result.csr);
         String subject = csr.getSubject().toString();
@@ -134,21 +132,21 @@ public class CSRModuleTest {
 
     @Test
     public void testGenerateCSRForP384ProducesParseableCSR() throws Exception {
-        CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("alias-p384", "secp384r1"));
+        CSRCore.CSRGenerationResult result = module.generateCSRInternal(paramsFor("alias-p384", "secp384r1"));
         PKCS10CertificationRequest csr = parseCSR(result.csr);
         assertTrue(csr.getSubject().toString().contains("CN=test-device"));
     }
 
     @Test
     public void testGenerateCSRForP521ProducesParseableCSR() throws Exception {
-        CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("alias-p521", "secp521r1"));
+        CSRCore.CSRGenerationResult result = module.generateCSRInternal(paramsFor("alias-p521", "secp521r1"));
         PKCS10CertificationRequest csr = parseCSR(result.csr);
         assertTrue(csr.getSubject().toString().contains("CN=test-device"));
     }
 
     @Test
     public void testGenerateCSRSignatureVerifiesAgainstPublicKey() throws Exception {
-        CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("alias-verify", "secp256r1"));
+        CSRCore.CSRGenerationResult result = module.generateCSRInternal(paramsFor("alias-verify", "secp256r1"));
         PKCS10CertificationRequest csr = parseCSR(result.csr);
 
         org.bouncycastle.jce.provider.BouncyCastleProvider bc = new org.bouncycastle.jce.provider.BouncyCastleProvider();
@@ -241,7 +239,7 @@ public class CSRModuleTest {
 
     @Test
     public void testGenerateCSRResultIncludesKeystoreDescriptorForSoftwareKey() throws Exception {
-        CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("descriptor-alias", "secp256r1"));
+        CSRCore.CSRGenerationResult result = module.generateCSRInternal(paramsFor("descriptor-alias", "secp256r1"));
 
         assertNotNull("software-backed keys must expose a keystore descriptor", result.keystorePath);
         assertTrue(result.keystorePath.endsWith(KEYSTORE_NAME));
@@ -485,10 +483,10 @@ public class CSRModuleTest {
         ReflectionHelpers.setStaticField(android.os.Build.VERSION.class, "SDK_INT", 31);
         context.setNoBackupFilesDirUnavailable(true);
 
-        JavaOnlyMap params = paramsFor("hardware-path-alias", "secp256r1");
-        params.putBoolean("useHardwareKey", true);
+        Map<String, Object> params = paramsFor("hardware-path-alias", "secp256r1");
+        params.put("useHardwareKey", true);
 
-        assertThrows(CSRModule.KeystoreLocationException.class,
+        assertThrows(CSRCore.KeystoreLocationException.class,
                 () -> module.generateCSRInternal(params));
     }
 
@@ -577,7 +575,7 @@ public class CSRModuleTest {
         }
 
         // Regeneration must not throw and must succeed despite the corrupt file on disk.
-        CSRModule.CSRGenerationResult result = module.generateCSRInternal(paramsFor("post-corruption-alias", "secp256r1"));
+        CSRCore.CSRGenerationResult result = module.generateCSRInternal(paramsFor("post-corruption-alias", "secp256r1"));
         assertNotNull(result.csr);
 
         // Quarantined files live in a keystore_forensics/ subdirectory (not alongside the live
@@ -708,8 +706,8 @@ public class CSRModuleTest {
 
     @Test
     public void testGenerateCSRWithInvalidIPAddressIsRejected() {
-        JavaOnlyMap params = paramsFor("bad-ip-alias", "secp256r1");
-        params.putString("ipAddress", "not-a-hostname-or-ip!!");
+        Map<String, Object> params = paramsFor("bad-ip-alias", "secp256r1");
+        params.put("ipAddress", "not-a-hostname-or-ip!!");
 
         RecordingPromise promise = new RecordingPromise();
         module.generateCSR(params, promise);
@@ -720,8 +718,8 @@ public class CSRModuleTest {
 
     @Test
     public void testGenerateCSRWithMissingAliasIsRejected() {
-        JavaOnlyMap params = new JavaOnlyMap();
-        params.putString("commonName", "test-device");
+        Map<String, Object> params = new HashMap<>();
+        params.put("commonName", "test-device");
 
         RecordingPromise promise = new RecordingPromise();
         module.generateCSR(params, promise);
@@ -732,7 +730,7 @@ public class CSRModuleTest {
 
     @Test
     public void testGenerateCSRWithInvalidCurveIsRejected() {
-        JavaOnlyMap params = paramsFor("bad-curve-alias", "secp256k1");
+        Map<String, Object> params = paramsFor("bad-curve-alias", "secp256k1");
 
         RecordingPromise promise = new RecordingPromise();
         module.generateCSR(params, promise);
@@ -742,33 +740,39 @@ public class CSRModuleTest {
     }
 
     @Test
-    public void testGenerateCSRBridgeResultIncludesKeystoreMapForSoftwareKey() {
-        // Arguments.createMap() needs the native RN JNI library, which isn't available in
-        // this JVM-only Robolectric environment (see generateCSRInternal's Javadoc for why
-        // the bridge wrapper is split from the core logic in the first place). Mock the static
-        // factory so this test can still assert on the actual WritableMap the bridge builds,
-        // not just the plain-Java CSRGenerationResult the other tests exercise.
-        try (org.mockito.MockedStatic<com.facebook.react.bridge.Arguments> arguments =
-                org.mockito.Mockito.mockStatic(com.facebook.react.bridge.Arguments.class)) {
-            arguments.when(com.facebook.react.bridge.Arguments::createMap)
-                    .thenAnswer(invocation -> new JavaOnlyMap());
+    public void testGenerateCSRWithNonStringParamIsRejectedWithGenericCode() {
+        // Pins the ReadableMap-era behaviour optString preserves: a wrongly-typed param fails CSR
+        // generation as a whole rather than being coerced or silently replaced by the default.
+        Map<String, Object> params = paramsFor("non-string-param-alias", "secp256r1");
+        params.put("country", 42.0);
 
-            JavaOnlyMap params = paramsFor("bridge-descriptor-alias", "secp256r1");
+        RecordingPromise promise = new RecordingPromise();
+        module.generateCSR(params, promise);
 
-            RecordingPromise promise = new RecordingPromise();
-            module.generateCSR(params, promise);
+        assertTrue(promise.rejected);
+        assertEquals("CSR_GENERATION_ERROR", promise.rejectedCode);
+    }
 
-            assertTrue(promise.resolved);
-            WritableMap response = promise.resolvedMap();
-            assertTrue("bridge response must include a keystore map for a software-backed key",
-                    response.hasKey("keystore"));
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testGenerateCSRResponseIncludesKeystoreMapForSoftwareKey() {
+        // Asserts on the map the Expo module hands to JS, not just the typed CSRGenerationResult
+        // the other tests exercise.
+        Map<String, Object> params = paramsFor("response-descriptor-alias", "secp256r1");
 
-            ReadableMap keystore = response.getMap("keystore");
-            assertNotNull(keystore);
-            assertTrue(keystore.getString("path").endsWith(KEYSTORE_NAME));
-            assertEquals("", keystore.getString("password"));
-            assertEquals("pkcs12", keystore.getString("format"));
-        }
+        RecordingPromise promise = new RecordingPromise();
+        module.generateCSR(params, promise);
+
+        assertTrue(promise.resolved);
+        Map<String, Object> response = promise.resolvedMap();
+        assertTrue("response must include a keystore map for a software-backed key",
+                response.containsKey("keystore"));
+
+        Map<String, Object> keystore = (Map<String, Object>) response.get("keystore");
+        assertNotNull(keystore);
+        assertTrue(((String) keystore.get("path")).endsWith(KEYSTORE_NAME));
+        assertEquals("", keystore.get("password"));
+        assertEquals("pkcs12", keystore.get("format"));
     }
 
     // ---- getHardwareKeystoreCapabilities / TLS-compatibility detection ----
@@ -780,7 +784,7 @@ public class CSRModuleTest {
         // @Config triggers Robolectric's binary-resource loading path, which this module's
         // minSdk (23) is incompatible with under react-android 0.76's manifest (minSdk 24).
         ReflectionHelpers.setStaticField(android.os.Build.VERSION.class, "SDK_INT", 30);
-        CSRModule.HardwareCapabilities caps = module.getHardwareKeystoreCapabilitiesInternal();
+        CSRCore.HardwareCapabilities caps = module.getHardwareKeystoreCapabilitiesInternal();
         assertFalse(caps.tlsCompatible);
         assertEquals(30, caps.androidSdkVersion);
     }
@@ -789,14 +793,14 @@ public class CSRModuleTest {
     public void testHardwareCapabilitiesApi31PlusTlsCompatible() {
         // Android 12 (API 31) - PURPOSE_AGREE_KEY support added.
         ReflectionHelpers.setStaticField(android.os.Build.VERSION.class, "SDK_INT", 31);
-        CSRModule.HardwareCapabilities caps = module.getHardwareKeystoreCapabilitiesInternal();
+        CSRCore.HardwareCapabilities caps = module.getHardwareKeystoreCapabilitiesInternal();
         assertTrue(caps.tlsCompatible);
         assertEquals(31, caps.androidSdkVersion);
     }
 
     @Test
     public void testHardwareCapabilitiesReturnsDocumentedShape() {
-        CSRModule.HardwareCapabilities caps = module.getHardwareKeystoreCapabilitiesInternal();
+        CSRCore.HardwareCapabilities caps = module.getHardwareKeystoreCapabilitiesInternal();
         assertNotNull(caps.manufacturer);
         assertNotNull(caps.model);
         assertNotNull(caps.device);
@@ -808,10 +812,10 @@ public class CSRModuleTest {
         // derived from build.gradle's targetSdk/compileSdk 36, not a low fallback value) -
         // canUseHardwareKeysForTLS() requires API 31+, so API 30 forces software fallback.
         ReflectionHelpers.setStaticField(android.os.Build.VERSION.class, "SDK_INT", 30);
-        JavaOnlyMap params = paramsFor("hw-fallback-alias", "secp256r1");
-        params.putBoolean("useHardwareKey", true);
+        Map<String, Object> params = paramsFor("hw-fallback-alias", "secp256r1");
+        params.put("useHardwareKey", true);
 
-        CSRModule.CSRGenerationResult result = module.generateCSRInternal(params);
+        CSRCore.CSRGenerationResult result = module.generateCSRInternal(params);
 
         assertTrue(result.hardwareKeyRequested);
         assertFalse("device isn't TLS-compatible for hardware keys, must fall back to software",

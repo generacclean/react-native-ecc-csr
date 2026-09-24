@@ -1,6 +1,4 @@
-import { NativeModules } from 'react-native';
-
-const { CSRModule } = NativeModules;
+import { requireNativeModule } from 'expo';
 
 export type ECCurve = 'secp256r1' | 'secp384r1' | 'secp521r1';
 
@@ -102,4 +100,8 @@ export interface CSRModuleInterface {
   getPublicKey(privateKeyAlias: string): Promise<string>;
 }
 
-export default CSRModule as CSRModuleInterface;
+// Throws at import if the native module is not linked, rather than handing back undefined and
+// failing later at the first call as NativeModules did.
+const CSRModule = requireNativeModule<CSRModuleInterface>('CSRModule');
+
+export default CSRModule;

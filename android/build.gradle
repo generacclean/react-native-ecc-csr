@@ -12,6 +12,21 @@ buildscript {
 
 apply plugin: "com.android.library"
 
+// The Expo module glue (CSRModule.kt) needs expo-modules-core, which only exists as a Gradle project
+// inside a consuming app. Standalone builds - `./gradlew test` here and in CI - have no such project,
+// so they skip Kotlin entirely: .kt sources are ignored without the Kotlin plugin, and the RN/Expo-
+// free CSRCore that the tests exercise still compiles and runs on its own.
+//
+// ExpoModulesCorePlugin.gradle is used instead of `plugins { id 'expo-module-gradle-plugin' }`
+// because a plugins block cannot be applied conditionally, and that plugin only resolves inside an
+// app whose settings.gradle includes Expo's plugin build.
+def expoModulesCore = rootProject.findProject(":expo-modules-core")
+if (expoModulesCore != null) {
+    apply from: new File(expoModulesCore.projectDir, "ExpoModulesCorePlugin.gradle")
+    applyKotlinExpoModulesCorePlugin()
+    useCoreDependencies()
+}
+
 android {
     compileSdk 36
     namespace 'com.ecccsr'
@@ -27,8 +42,10 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        // 17 to match what React Native's Gradle plugin configures for every library in the app,
+        // so Java and Kotlin targets agree there; CI runs the standalone tests on JDK 17 too.
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 
     buildFeatures {
@@ -55,22 +72,12 @@ repositories {
 }
 
 dependencies {
-    // React Native classes are provided by the consuming app at compile/runtime via
-    // autolinking; compileOnly avoids bundling them into this module's AAR.
-    // Pinned to a Maven Central coordinate (published since RN 0.71) rather than the
-    // "com.facebook.react:react-native:+" autolinking wildcard, which only resolves
-    // inside a consuming app's local Maven repo and breaks standalone Gradle builds.
-    // This module compiles against exactly this version regardless of the consuming
-    // app's actual RN version - bump deliberately if the bridge API this module uses
-    // (Promise, ReactApplicationContext, ReadableMap, WritableMap) ever changes shape,
-    // e.g. as part of the Turbo Modules migration (IA-5752).
-    compileOnly 'com.facebook.react:react-android:0.76.0'
+    // No React Native dependency: CSRCore uses only Android and BouncyCastle APIs, and the Expo
+    // glue gets expo-modules-core (and React Native through it) from useCoreDependencies() above.
     implementation 'org.bouncycastle:bcprov-jdk18on:1.76'
     implementation 'org.bouncycastle:bcpkix-jdk18on:1.76'
 
     // Test dependencies
-    testImplementation 'com.facebook.react:react-android:0.76.0'
     testImplementation 'junit:junit:4.13.2'
-    testImplementation 'org.mockito:mockito-core:5.3.1'
     testImplementation 'org.robolectric:robolectric:4.10.3'
 }

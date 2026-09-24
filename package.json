@@ -15,7 +15,7 @@
     "ios",
     "react-native-ecc-csr.podspec",
     "src",
-    "react-native.config.js"
+    "expo-module.config.json"
   ],
   "keywords": [
     "react-native",
@@ -37,6 +37,7 @@
     "registry": "https://npm.pkg.github.com"
   },
   "peerDependencies": {
-    "react-native": ">=0.60.0"
+    "expo": ">=55.0.0",
+    "react-native": ">=0.83.0"
   }
 }

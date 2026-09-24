@@ -1,4 +1,4 @@
-#import "CSRModule.h"
+#import "CSRCore.h"
 #import <Security/Security.h>
 #import <CommonCrypto/CommonCrypto.h>
 #import <sys/utsname.h>
@@ -12,13 +12,9 @@ static NSString * const DEFAULT_ORGANIZATIONAL_UNIT = @"Field Pro";
 static NSString * const DEFAULT_IP_ADDRESS = @"10.10.10.10";
 static NSString * const DEFAULT_ECC_CURVE = @"secp384r1";
 
-@implementation CSRModule
+@implementation CSRCore
 
-RCT_EXPORT_MODULE(CSRModule)
-
-RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+- (void)generateCSR:(NSDictionary<NSString *, id> *)params resolve:(CSRResolveBlock)resolve reject:(CSRRejectBlock)reject
 {
     @try {
         NSString *commonName = params[@"commonName"] ?: @"";
@@ -112,9 +108,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
     }
 }
 
-RCT_EXPORT_METHOD(deleteKey:(NSString *)privateKeyAlias
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+- (void)deleteKey:(NSString *)privateKeyAlias resolve:(CSRResolveBlock)resolve reject:(CSRRejectBlock)reject
 {
     @try {
         BOOL success = [self deleteKeyWithAlias:privateKeyAlias];
@@ -124,9 +118,7 @@ RCT_EXPORT_METHOD(deleteKey:(NSString *)privateKeyAlias
     }
 }
 
-RCT_EXPORT_METHOD(keyExists:(NSString *)privateKeyAlias
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+- (void)keyExists:(NSString *)privateKeyAlias resolve:(CSRResolveBlock)resolve reject:(CSRRejectBlock)reject
 {
     @try {
         BOOL exists = [self keyExistsWithAlias:privateKeyAlias];
@@ -136,9 +128,7 @@ RCT_EXPORT_METHOD(keyExists:(NSString *)privateKeyAlias
     }
 }
 
-RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+- (void)getPublicKey:(NSString *)privateKeyAlias resolve:(CSRResolveBlock)resolve reject:(CSRRejectBlock)reject
 {
     @try {
         NSError *error = nil;
@@ -155,8 +145,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     }
 }
 
-RCT_EXPORT_METHOD(getHardwareKeystoreCapabilities:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+- (void)getHardwareKeystoreCapabilities:(CSRResolveBlock)resolve reject:(CSRRejectBlock)reject
 {
     @try {
         // iOS Secure Enclave is always TLS-compatible (no SDK version gating like Android)
