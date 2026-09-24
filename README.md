@@ -12,7 +12,7 @@ A React Native module for generating Certificate Signing Requests (CSR) with Ell
 
 **Backup Exclusion (Android):** No configuration required. Android never includes `getNoBackupFilesDir()` in Auto Backup, cloud backup, or device-to-device transfer, so the private key cannot leave the device through backup infrastructure no matter what your app sets for `android:allowBackup`, `android:fullBackupContent`, or `android:dataExtractionRules`.
 
-**iOS is different — do not read the guarantee above as cross-platform.** iOS keys live in the Keychain, not in a file, so none of the directory or manifest discussion applies. `ios/CSRCore.m` adds Keychain items without an explicit `kSecAttrAccessible` value, which means they default to `kSecAttrAccessibleWhenUnlocked` — and an *encrypted* iTunes/Finder backup **does** include items with that accessibility. Only the `…ThisDeviceOnly` variants are excluded. Secure Enclave keys (`useHardwareKey: true`) are non-exportable regardless. Treat a software-backed iOS key as backup-eligible until this module sets `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
+**iOS is different — do not read the guarantee above as cross-platform.** iOS keys live in the Keychain, not in a file, so none of the directory or manifest discussion applies. `ios/CSRCore.swift` adds Keychain items without an explicit `kSecAttrAccessible` value, which means they default to `kSecAttrAccessibleWhenUnlocked` — and an *encrypted* iTunes/Finder backup **does** include items with that accessibility. Only the `…ThisDeviceOnly` variants are excluded. Secure Enclave keys (`useHardwareKey: true`) are non-exportable regardless. Treat a software-backed iOS key as backup-eligible until this module sets `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
 
 Earlier versions shipped `backup_rules.xml` and `data_extraction_rules.xml` for the consuming app to reference from its manifest. Those files have been **removed** — the approach could not be made reliable, because `android:fullBackupContent` and `android:dataExtractionRules` each accept exactly one resource reference and nothing merges them. Any other library that claimed either attribute (`expo-secure-store`, for example) silently deactivated this module's exclusions. If your manifest or config plugin still references `@xml/backup_rules` or `@xml/data_extraction_rules` from this package, remove those references; nothing else is needed in their place.
 
@@ -329,8 +329,8 @@ exposes it to JS as `CSRModule`:
 
 | | Core (all logic, error codes, response shape) | Expo module (argument/promise adapter) |
 |---|---|---|
-| Android | `android/src/main/java/com/ecccsr/CSRCore.java` | `android/src/main/java/com/ecccsr/CSRModule.kt` |
-| iOS | `ios/CSRCore.m` | `ios/CSRModule.swift` |
+| Android | `android/src/main/java/com/ecccsr/CSRCore.kt` | `android/src/main/java/com/ecccsr/CSRModule.kt` |
+| iOS | `ios/CSRCore.swift` | `ios/CSRModule.swift` |
 
 Both Expo modules run their calls on a dedicated serial queue rather than Expo's shared one, so a
 slow key generation cannot stall other modules' async calls.
@@ -367,7 +367,7 @@ silently drops every Robolectric test down to its API 16 floor — seven levels 
 `minSdk 23`. Platform APIs newer than 16 then fail at runtime with `NoSuchMethodError` despite
 compiling cleanly. Tests that need a specific level still override `Build.VERSION.SDK_INT` locally.
 
-**iOS has no automated test coverage.** `ios/CSRCore.m` carries the other half of this
+**iOS has no automated test coverage.** `ios/CSRCore.swift` carries the other half of this
 module and is verified manually only, so a CSR-format regression on iOS would not be caught
 by CI. Exercise iOS changes against a real device or simulator before release.
 

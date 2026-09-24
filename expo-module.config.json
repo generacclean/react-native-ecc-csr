@@ -1,10 +1,16 @@
 {
-  "platforms": ["apple", "android"],
+  "platforms": [
+    "apple",
+    "android"
+  ],
   "apple": {
-    "modules": ["CSRModule"],
-    "podspecPath": "react-native-ecc-csr.podspec"
+    "modules": [
+      "CSRModule"
+    ]
   },
   "android": {
-    "modules": ["com.ecccsr.CSRModule"]
+    "modules": [
+      "com.ecccsr.CSRModule"
+    ]
   }
 }

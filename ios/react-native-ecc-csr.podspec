@@ -1,6 +1,6 @@
 require "json"
 
-package = JSON.parse(File.read(File.join(__dir__, "package.json")))
+package = JSON.parse(File.read(File.join(__dir__, "..", "package.json")))
 
 Pod::Spec.new do |s|
   s.name         = "react-native-ecc-csr"
@@ -16,12 +16,11 @@ Pod::Spec.new do |s|
   s.source       = { :git => "https://github.com/generacclean/react-native-ecc-csr.git", :tag => "#{s.version}" }
   s.static_framework = true
 
-  # Swift (CSRModule, the Expo glue) and Objective-C (CSRCore) in one pod: DEFINES_MODULE makes
-  # CocoaPods emit an umbrella header for CSRCore.h, which is how the Swift side sees it.
-  s.source_files = "ios/**/*.{h,m,swift}"
+  # Lives in ios/ rather than the package root because that is where Expo autolinking looks for
+  # podspecs, so paths here are relative to ios/.
+  s.source_files = "**/*.swift"
   s.pod_target_xcconfig = {
-    "DEFINES_MODULE" => "YES",
-    "SWIFT_COMPILATION_MODE" => "wholemodule"
+    "DEFINES_MODULE" => "YES"
   }
 
   s.dependency "ExpoModulesCore"

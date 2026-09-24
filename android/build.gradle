@@ -7,15 +7,19 @@ buildscript {
     dependencies {
         // Upgraded to 8.6.0 to support Gradle 9.0.0 and compileSdk 36
         classpath 'com.android.tools.build:gradle:8.6.0'
+        // Inside an app the root build's Kotlin plugin wins; this is what standalone builds use.
+        // Defaults to the version React Native 0.83 pins, so both builds compile with the same one.
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:${rootProject.ext.has('kotlinVersion') ? rootProject.ext.get('kotlinVersion') : '2.1.20'}"
     }
 }
 
 apply plugin: "com.android.library"
+apply plugin: "kotlin-android"
 
 // The Expo module glue (CSRModule.kt) needs expo-modules-core, which only exists as a Gradle project
 // inside a consuming app. Standalone builds - `./gradlew test` here and in CI - have no such project,
-// so they skip Kotlin entirely: .kt sources are ignored without the Kotlin plugin, and the RN/Expo-
-// free CSRCore that the tests exercise still compiles and runs on its own.
+// so they exclude that one file (see the KotlinCompile block below), and the RN/Expo-free CSRCore
+// that the tests exercise still compiles and runs on its own.
 //
 // ExpoModulesCorePlugin.gradle is used instead of `plugins { id 'expo-module-gradle-plugin' }`
 // because a plugins block cannot be applied conditionally, and that plugin only resolves inside an
@@ -49,7 +53,7 @@ android {
     }
 
     buildFeatures {
-        // Required because CSRModule.java reads BuildConfig.DEBUG to gate verbose logging.
+        // Required because CSRCore.kt reads BuildConfig.DEBUG to gate verbose logging.
         buildConfig true
     }
 
@@ -63,6 +67,19 @@ android {
             // cleanly against compileSdk 36.
             includeAndroidResources = true
         }
+    }
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        // Emit interface default methods as real JVM default methods, so Java implementations of
+        // CSRCore.Reply (the tests' RecordingPromise) inherit its two-argument reject().
+        freeCompilerArgs.add("-Xjvm-default=all")
+    }
+    if (expoModulesCore == null) {
+        // Excluded on the compile task because an android.sourceSets exclude does not reach Kotlin.
+        exclude("com/ecccsr/CSRModule.kt")
     }
 }
 

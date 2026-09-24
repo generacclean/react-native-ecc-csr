@@ -13,7 +13,6 @@
     "!android/.gradle",
     "!android/.gradle/**",
     "ios",
-    "react-native-ecc-csr.podspec",
     "src",
     "expo-module.config.json"
   ],

@@ -231,7 +231,7 @@ Robolectric coverage of `CSRCore` and a blocking CI pipeline
 
 1. **Add instrumented tests** in a separate directory for the hardware-keystore paths
    listed under "What's NOT Tested" above
-2. **Add iOS test coverage** — `ios/CSRCore.m` is verified manually only
+2. **Add iOS test coverage** — `ios/CSRCore.swift` is verified manually only
 
 ## Troubleshooting
 

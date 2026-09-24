@@ -127,6 +127,17 @@ public class InputValidationTest {
         assertFalse("whitespace alias should fail", isValidAlias("   "));
     }
 
+    @Test
+    public void testTrimmingFollowsJavaStringTrimRules() {
+        // CSRCore trims the way java.lang.String#trim does: every char <= U+0020, and nothing else.
+        // Kotlin's trim() differs in both directions, and would change which aliases are accepted
+        // and the alias an existing key is looked up under.
+        assertFalse("control-char-only alias should fail", isValidAlias("\u0000\t"));
+        assertTrue("NBSP-only alias is not blank to String#trim", isValidAlias("\u00A0"));
+        assertEquals("Should strip control chars", "Test", module.sanitizeDNValue("\u0000Test\u001F"));
+        assertEquals("Should keep NBSP", "\u00A0Test\u00A0", module.sanitizeDNValue("\u00A0Test\u00A0"));
+    }
+
     private boolean isValidAlias(String alias) {
         return module.isValidAlias(alias);
     }

@@ -18,29 +18,36 @@ public class CSRModule: Module {
     Name("CSRModule")
 
     AsyncFunction("generateCSR") { (params: [String: Any], promise: Promise) in
-      self.core.generateCSR(params, resolve: promise.resolver, reject: Self.rejecter(promise))
+      Self.settle(promise) { try self.core.generateCSR(params) }
     }.runOnQueue(queue)
 
     AsyncFunction("getHardwareKeystoreCapabilities") { (promise: Promise) in
-      self.core.getHardwareKeystoreCapabilities(promise.resolver, reject: Self.rejecter(promise))
+      Self.settle(promise) { self.core.getHardwareKeystoreCapabilities() }
     }.runOnQueue(queue)
 
     AsyncFunction("deleteKey") { (privateKeyAlias: String, promise: Promise) in
-      self.core.deleteKey(privateKeyAlias, resolve: promise.resolver, reject: Self.rejecter(promise))
+      Self.settle(promise) { self.core.deleteKey(privateKeyAlias) }
     }.runOnQueue(queue)
 
     AsyncFunction("keyExists") { (privateKeyAlias: String, promise: Promise) in
-      self.core.keyExists(privateKeyAlias, resolve: promise.resolver, reject: Self.rejecter(promise))
+      Self.settle(promise) { self.core.keyExists(privateKeyAlias) }
     }.runOnQueue(queue)
 
     AsyncFunction("getPublicKey") { (privateKeyAlias: String, promise: Promise) in
-      self.core.getPublicKey(privateKeyAlias, resolve: promise.resolver, reject: Self.rejecter(promise))
+      Self.settle(promise) { try self.core.getPublicKey(privateKeyAlias) }
     }.runOnQueue(queue)
   }
 
-  private static func rejecter(_ promise: Promise) -> CSRRejectBlock {
-    return { code, message, _ in
-      promise.reject(code, message ?? "")
+  /// Rejects through `promise.reject(code, message)` rather than by throwing from the closure:
+  /// a thrown error reaches JS wrapped in Expo's FunctionCallException, which replaces our code.
+  private static func settle(_ promise: Promise, _ body: () throws -> Any) {
+    do {
+      promise.resolve(try body())
+    } catch let error as CSRError {
+      promise.reject(error.code, error.message)
+    } catch {
+      // CSRCore only throws CSRError; this keeps the promise from never settling if that changes.
+      promise.reject("NATIVE_ERROR", error.localizedDescription)
     }
   }
 }
