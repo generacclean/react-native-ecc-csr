@@ -12,7 +12,7 @@ A React Native module for generating Certificate Signing Requests (CSR) with Ell
 
 **Backup Exclusion (Android):** No configuration required. Android never includes `getNoBackupFilesDir()` in Auto Backup, cloud backup, or device-to-device transfer, so the private key cannot leave the device through backup infrastructure no matter what your app sets for `android:allowBackup`, `android:fullBackupContent`, or `android:dataExtractionRules`.
 
-**iOS is different — do not read the guarantee above as cross-platform.** iOS keys live in the Keychain, not in a file, so none of the directory or manifest discussion applies. `ios/CSRModule.m` adds Keychain items without an explicit `kSecAttrAccessible` value, which means they default to `kSecAttrAccessibleWhenUnlocked` — and an *encrypted* iTunes/Finder backup **does** include items with that accessibility. Only the `…ThisDeviceOnly` variants are excluded. Secure Enclave keys (`useHardwareKey: true`) are non-exportable regardless. Treat a software-backed iOS key as backup-eligible until this module sets `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
+**iOS is different — do not read the guarantee above as cross-platform.** iOS keys live in the Keychain, not in a file, so none of the directory or manifest discussion applies. Since 2.0.0, `ios/CSRCore.swift` stores software keys with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, which excludes them from encrypted iTunes/Finder backups and device migration. Keys created by 1.x were stored with the default `kSecAttrAccessibleWhenUnlocked`, which encrypted backups **do** include; they keep that accessibility until regenerated. Secure Enclave keys (`useHardwareKey: true`) are non-exportable regardless.
 
 Earlier versions shipped `backup_rules.xml` and `data_extraction_rules.xml` for the consuming app to reference from its manifest. Those files have been **removed** — the approach could not be made reliable, because `android:fullBackupContent` and `android:dataExtractionRules` each accept exactly one resource reference and nothing merges them. Any other library that claimed either attribute (`expo-secure-store`, for example) silently deactivated this module's exclusions. If your manifest or config plugin still references `@xml/backup_rules` or `@xml/data_extraction_rules` from this package, remove those references; nothing else is needed in their place.
 
@@ -36,7 +36,7 @@ See [Security Considerations](#security-considerations) section below for detail
 - ✅ Generate CSR with ECC keys (P-256, P-384, P-521)
 - ✅ Intelligent hardware vs software keystore selection
 - ✅ Hardware-backed keys with TLS compatibility checks
-- ✅ SHA256 signature algorithm
+- ✅ ECDSA signature digest matched to the curve (SHA-256 / SHA-384 / SHA-512)
 - ✅ Subject Alternative Name (SAN) support with IP addresses
 - ✅ Full TypeScript support
 - ✅ Configurable subject DN fields
@@ -141,6 +141,9 @@ interface CSRResult {
                                    // compatibility (see CSRKeystoreDescriptor in src/index.ts)
     format: 'pkcs12';
   };
+  warnings?: string[];            // Android only. Non-fatal problems, absent when there are none.
+                                   // "STALE_KEY_CLEANUP_FAILED: ..." means an old key under this
+                                   // alias could not be removed; call deleteKey to retry.
 }
 ```
 
@@ -166,6 +169,9 @@ Generates a Certificate Signing Request with the specified parameters.
 | `phoneInfo`          | string  | No       | ""            | PhoneInfo                                           |
 | `privateKeyAlias`    | string  | Yes      | -             | Unique alias for the key pair                       |
 | `useHardwareKey`     | boolean | No       | false         | Request hardware keystore (module decides final)    |
+
+An omitted, `undefined` or `null` parameter takes its default. A parameter of the wrong type is
+rejected by Expo with an `ERR_*` code before the CSR is generated.
 
 #### Returns
 
@@ -195,11 +201,15 @@ Deletes a key from both hardware and software keystores.
 
 ### `keyExists(privateKeyAlias: string): Promise<boolean>`
 
-Checks if a key exists in either hardware or software keystore.
+Checks if a key exists in either hardware or software keystore. Rejects with `KEY_EXISTS_ERROR`
+when the keystore cannot be read (on iOS, for example, while the device is locked). Treat that as
+"unknown", not as "missing": re-enrolling on it would replace a key that may still be enrolled.
 
 ### `getPublicKey(privateKeyAlias: string): Promise<string>`
 
-Retrieves the public key for a given alias from either keystore.
+Retrieves the public key for a given alias from either keystore. Rejects with `KEY_NOT_FOUND`
+when there is no key under the alias, and `GET_PUBLIC_KEY_ERROR` when there is one but it cannot
+be read.
 
 ## Supported Curves
 
@@ -251,7 +261,7 @@ See [example-usage.tsx](./example-usage.tsx) for more examples.
 # View CSR details
 openssl req -in csr.csr -noout -text
 
-# Check signature algorithm (should be ecdsa-with-SHA256)
+# Check signature algorithm (ecdsa-with-SHA256 / SHA384 / SHA512 for P-256 / P-384 / P-521)
 openssl req -in csr.csr -noout -text | grep "Signature Algorithm"
 
 # Check curve
@@ -266,7 +276,7 @@ openssl req -in csr.csr -noout -text | grep -A 1 "Subject Alternative Name"
 The module generates CSRs with the following characteristics:
 
 - **Format:** PKCS#10
-- **Signature Algorithm:** ecdsa-with-SHA256
+- **Signature Algorithm:** ecdsa-with-SHA256 (P-256), ecdsa-with-SHA384 (P-384, the default), ecdsa-with-SHA512 (P-521)
 - **Key Usage (critical):** Digital Signature, Key Agreement
 - **Extended Key Usage:** TLS Web Client Authentication
 - **Subject Alternative Name:** IP Address (configurable)
@@ -290,7 +300,7 @@ Certificate Request:
                 TLS Web Client Authentication
             X509v3 Subject Alternative Name:
                 IP Address:10.10.10.10
-    Signature Algorithm: ecdsa-with-SHA256
+    Signature Algorithm: ecdsa-with-SHA384
 ```
 
 ## TypeScript Support
@@ -316,9 +326,40 @@ const result: CSRResult = await CSRModule.generateCSR(params);
 
 ## Requirements
 
-- React Native >= 0.60
-- Android SDK >= 21
+- An app using Expo Modules (Expo SDK >= 55, React Native >= 0.83). This is an
+  [Expo Module](https://docs.expo.dev/modules/overview/), linked by Expo autolinking; bare React
+  Native apps need [`expo` installed](https://docs.expo.dev/bare/installing-expo-modules/) first.
+- Android minSdk 24, iOS 15.1 (the floors of Expo SDK 55)
 - BouncyCastle library (included)
+
+## Troubleshooting
+
+**`Cannot find native module 'CSRModule'` at startup.** The module is linked by Expo autolinking,
+and since 2.0 `requireNativeModule` throws as soon as the package is imported (1.x only failed on
+the first call). Check that the app uses Expo Modules (see [Requirements](#requirements)), then
+rebuild the native projects with `npx expo prebuild --clean`.
+
+**Upgraded from 1.x but the old native code still runs, or the build fails on `CSRPackage`.** The
+native projects were generated before the upgrade. Run `npx expo prebuild --clean` and remove any
+manual linking the app added for 1.x: `react-native.config.js` overrides, `Podfile` entries, or a
+`CSRPackage` registration in `MainApplication`.
+
+**iOS build fails on the deployment target.** 2.0 requires iOS 15.1. Apps that support iOS
+12.0–15.0 must stay on 1.x.
+
+## Architecture
+
+Each platform has a core that holds all behaviour, and a thin Expo module that exposes it to JS as
+`CSRModule`. The core takes and returns Expo `Record` types and throws Expo coded exceptions, so
+Expo converts the arguments and settles the promises; the module only picks the thread:
+
+| | Core (all logic, error codes, response shape) | Expo module (moves calls to its queue) |
+|---|---|---|
+| Android | `android/src/main/java/com/ecccsr/CSRCore.kt` | `android/src/main/java/com/ecccsr/CSRModule.kt` |
+| iOS | `ios/CSRCore.swift` | `ios/CSRModule.swift` |
+
+Both Expo modules run their calls on a dedicated serial queue rather than Expo's shared one, so a
+slow key generation cannot stall other modules' async calls.
 
 ## Dependencies
 
@@ -329,34 +370,47 @@ const result: CSRResult = await CSRModule.generateCSR(params);
 
 These are automatically included by the module as transitive dependencies.
 
-**React Native compile version:** this module compiles against exactly
-`com.facebook.react:react-android:0.76.0` (`compileOnly`), pinned so `./gradlew test` works
-standalone outside a consuming app. The app supplies its own React Native version at
-runtime, which is fine while the bridge API this module uses (`Promise`,
-`ReactApplicationContext`, `ReadableMap`, `WritableMap`) stays stable. Bump the pin in
-`android/build.gradle` deliberately - notably for the Turbo Modules migration (IA-5752).
+**No React Native compile dependency:** `CSRCore` uses Android, BouncyCastle and
+`expo-modules-core` APIs only (the last for `Record` and `CodedException`). The module gets
+`expo-modules-core` through `expo-module-gradle-plugin`, which only resolves inside an app, so the
+module is built and tested through the example app in `example/`.
 
 ## Testing
 
-Android logic is covered by JVM unit tests (Robolectric) and gated in CI by
-`.github/workflows/android-tests.yml`:
+`example/` is an Expo SDK 55 app that links this module from the repo root, with a button for each
+function. CI (`.github/workflows/ci.yml`) type-checks the library and the example, runs the Android
+unit tests and the iOS XCTests, builds the example for Android and the iOS simulator, and lints the
+podspec.
 
 ```bash
-cd android && ./gradlew test
+yarn install && (cd example && yarn install)
+yarn typecheck && yarn typecheck:example
+
+cd example
+npx expo prebuild --clean   # generates example/android and example/ios
+cd android && ./gradlew :generacclean-react-native-ecc-csr:testDebugUnitTest
+cd ../ios && xcodebuild test -workspace ECCCSRExample.xcworkspace -scheme react-native-ecc-csr-Unit-Tests \
+  -destination "platform=iOS Simulator,name=<device>"
+cd .. && npx expo run:ios   # or run:android, to try it on a simulator or device
 ```
+
+Android logic is covered by JVM unit tests (Robolectric); test reports land in
+`android/build/reports/tests/`.
 
 See `android/src/test/README.md` for what is and isn't covered.
 
 Robolectric tests run against API 33, pinned in `android/src/test/resources/robolectric.properties`
 and backed by `testOptions.unitTests.includeAndroidResources`. Both are required: without the merged
 manifest, Robolectric falls back to legacy resources mode, which is unsupported after API 28 and
-silently drops every Robolectric test down to its API 16 floor — seven levels below this module's
-`minSdk 23`. Platform APIs newer than 16 then fail at runtime with `NoSuchMethodError` despite
+silently drops every Robolectric test down to its API 16 floor — eight levels below the `minSdk 24`
+that expo-modules-core requires. Platform APIs newer than 16 then fail at runtime with `NoSuchMethodError` despite
 compiling cleanly. Tests that need a specific level still override `Build.VERSION.SDK_INT` locally.
 
-**iOS has no automated test coverage.** `ios/CSRModule.m` carries the other half of this
-module and is verified manually only, so a CSR-format regression on iOS would not be caught
-by CI. Exercise iOS changes against a real device or simulator before release.
+iOS logic is covered by XCTests in `ios/Tests/`: validation, the signature digest per curve (each CSR
+is parsed and its signature verified), and the Keychain lifecycle. They are a CocoaPods test spec
+that runs inside a generated app host, because the Keychain rejects unhosted test bundles;
+`example/plugins/withLibraryTests.js` enables it in the example Podfile. Secure Enclave keys still
+need a physical device.
 
 ## Android Configuration
 
@@ -503,7 +557,7 @@ Understanding the security implications of different key storage methods is impo
 | **Encryption at Rest** | ❌ No encryption (OS-level protection only) | ✅ Hardware-encrypted |
 | **Root Protection** | ❌ Vulnerable to root access | ✅ Fully protected |
 | **Backup Exposure** | ✅ Excluded (stored in `no_backup/`) | ✅ Cannot be backed up |
-| **Device Compatibility** | ✅ All devices (API 23+) | ⚠️ Android 12+ for TLS |
+| **Device Compatibility** | ✅ All devices (API 24+) | ⚠️ Android 12+ for TLS |
 | **Performance** | ⚠️ Slower (software crypto) | ✅ Faster (hardware acceleration) |
 | **Survives Reinstall** | ❌ Deleted with app | ✅ Persists (manual delete required) |
 | **Key Extraction** | ⚠️ Possible with root or physical access | ✅ Impossible (hardware-bound) |

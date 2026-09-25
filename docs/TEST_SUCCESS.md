@@ -1,5 +1,7 @@
 # Test Success Report - Software Keystore Implementation
 
+> **Historical (1.x).** This report records the Java implementation. Since 2.0 the CSR digest follows the curve, so a P-384 CSR is signed with `ecdsa-with-SHA384` (P-256: SHA-256, P-521: SHA-512).
+
 ## Test Environment
 - **Device**: Pixel 8
 - **OS**: Android 15 (API level unknown, but > 31)

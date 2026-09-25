@@ -1,6 +1,4 @@
-import { NativeModules } from 'react-native';
-
-const { CSRModule } = NativeModules;
+import { requireNativeModule } from 'expo';
 
 export type ECCurve = 'secp256r1' | 'secp384r1' | 'secp521r1';
 
@@ -49,6 +47,13 @@ export interface CSRResult {
    * absent — keys are stored in the Keychain, not a file, regardless of useHardwareKey.
    */
   keystore?: CSRKeystoreDescriptor;
+  /**
+   * Android only. Non-fatal problems hit while generating the CSR; absent when there were none.
+   * Today the only one starts with `STALE_KEY_CLEANUP_FAILED`: a key left under this alias by an
+   * earlier call could not be removed from the other keystore. The new key and CSR are valid, but
+   * the stale key is still on the device - call `deleteKey` to retry removing it.
+   */
+  warnings?: string[];
 }
 
 export interface HardwareKeystoreCapabilities {
@@ -102,4 +107,16 @@ export interface CSRModuleInterface {
   getPublicKey(privateKeyAlias: string): Promise<string>;
 }
 
-export default CSRModule as CSRModuleInterface;
+// Throws at import if the native module is not linked, rather than handing back undefined and
+// failing later at the first call as NativeModules did.
+const NativeCSRModule = requireNativeModule<CSRModuleInterface>('CSRModule');
+
+const CSRModule: CSRModuleInterface = {
+  generateCSR: (params) => NativeCSRModule.generateCSR(params),
+  getHardwareKeystoreCapabilities: () => NativeCSRModule.getHardwareKeystoreCapabilities(),
+  deleteKey: (privateKeyAlias) => NativeCSRModule.deleteKey(privateKeyAlias),
+  keyExists: (privateKeyAlias) => NativeCSRModule.keyExists(privateKeyAlias),
+  getPublicKey: (privateKeyAlias) => NativeCSRModule.getPublicKey(privateKeyAlias),
+};
+
+export default CSRModule;

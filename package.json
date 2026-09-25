@@ -1,11 +1,17 @@
 {
   "name": "@generacclean/react-native-ecc-csr",
-  "version": "1.4.0",
+  "version": "2.0.0-beta.1",
   "description": "Secure ECC KeyPair + CSR generation for Android & iOS",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "react-native": "src/index.ts",
   "source": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "typecheck:example": "tsc --noEmit -p example",
+    "open:ios": "xed example/ios",
+    "open:android": "open -a \"Android Studio\" example/android"
+  },
   "files": [
     "android",
     "!android/build",
@@ -13,9 +19,9 @@
     "!android/.gradle",
     "!android/.gradle/**",
     "ios",
-    "react-native-ecc-csr.podspec",
+    "!ios/Tests",
     "src",
-    "react-native.config.js"
+    "expo-module.config.json"
   ],
   "keywords": [
     "react-native",
@@ -37,6 +43,14 @@
     "registry": "https://npm.pkg.github.com"
   },
   "peerDependencies": {
-    "react-native": ">=0.60.0"
+    "expo": ">=55.0.0",
+    "react-native": ">=0.83.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "expo": "~55.0.31",
+    "react": "19.2.0",
+    "react-native": "0.83.10",
+    "typescript": "~5.9.2"
   }
 }

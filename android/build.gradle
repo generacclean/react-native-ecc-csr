@@ -1,76 +1,51 @@
-// android/build.gradle
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-    }
-    dependencies {
-        // Upgraded to 8.6.0 to support Gradle 9.0.0 and compileSdk 36
-        classpath 'com.android.tools.build:gradle:8.6.0'
-    }
+plugins {
+  id 'com.android.library'
+  // Applies Kotlin and the expo-modules-core dependency, and takes compileSdk/targetSdk from the
+  // app. It only resolves inside an app, so the module is built and unit-tested through example/.
+  id 'expo-module-gradle-plugin'
 }
 
-apply plugin: "com.android.library"
+// Read from package.json so the publish workflow's version bump reaches the Android artifact too.
+def packageVersion = new groovy.json.JsonSlurper().parse(file('../package.json')).version
+
+group = 'com.ecccsr'
+version = packageVersion
 
 android {
-    compileSdk 36
-    namespace 'com.ecccsr'
+  namespace 'com.ecccsr'
 
-    defaultConfig {
-        minSdk 23
-        targetSdk 36
-        versionCode 1
-        versionName "1.0.0"
-        consumerProguardFiles "proguard-rules.pro"
+  defaultConfig {
+    versionCode 1
+    versionName packageVersion
+    consumerProguardFiles 'proguard-rules.pro'
+  }
 
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+  buildFeatures {
+    // Required because CSRCore.kt reads BuildConfig.DEBUG to gate verbose logging.
+    buildConfig true
+  }
+
+  lintOptions {
+    abortOnError false
+  }
+
+  testOptions {
+    unitTests {
+      // Robolectric needs the merged manifest and compiled resources on the unit-test
+      // classpath. Without this it finds no manifest, falls back to "legacy resources mode",
+      // and that mode is unsupported after API 28 - so it silently ran every Robolectric test
+      // against its API 16 floor, eight levels below the minSdk of 24 that expo-modules-core requires. Any platform
+      // API added after 16 then failed at runtime with NoSuchMethodError despite compiling
+      // cleanly against compileSdk 36.
+      includeAndroidResources = true
     }
-
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
-    }
-
-    buildFeatures {
-        // Required because CSRModule.java reads BuildConfig.DEBUG to gate verbose logging.
-        buildConfig true
-    }
-
-    testOptions {
-        unitTests {
-            // Robolectric needs the merged manifest and compiled resources on the unit-test
-            // classpath. Without this it finds no manifest, falls back to "legacy resources mode",
-            // and that mode is unsupported after API 28 - so it silently ran every Robolectric test
-            // against its API 16 floor, seven levels below this module's minSdk of 23. Any platform
-            // API added after 16 then failed at runtime with NoSuchMethodError despite compiling
-            // cleanly against compileSdk 36.
-            includeAndroidResources = true
-        }
-    }
-}
-
-repositories {
-    mavenCentral()
-    google()
+  }
 }
 
 dependencies {
-    // React Native classes are provided by the consuming app at compile/runtime via
-    // autolinking; compileOnly avoids bundling them into this module's AAR.
-    // Pinned to a Maven Central coordinate (published since RN 0.71) rather than the
-    // "com.facebook.react:react-native:+" autolinking wildcard, which only resolves
-    // inside a consuming app's local Maven repo and breaks standalone Gradle builds.
-    // This module compiles against exactly this version regardless of the consuming
-    // app's actual RN version - bump deliberately if the bridge API this module uses
-    // (Promise, ReactApplicationContext, ReadableMap, WritableMap) ever changes shape,
-    // e.g. as part of the Turbo Modules migration (IA-5752).
-    compileOnly 'com.facebook.react:react-android:0.76.0'
-    implementation 'org.bouncycastle:bcprov-jdk18on:1.76'
-    implementation 'org.bouncycastle:bcpkix-jdk18on:1.76'
+  implementation 'org.bouncycastle:bcprov-jdk18on:1.76'
+  implementation 'org.bouncycastle:bcpkix-jdk18on:1.76'
 
-    // Test dependencies
-    testImplementation 'com.facebook.react:react-android:0.76.0'
-    testImplementation 'junit:junit:4.13.2'
-    testImplementation 'org.mockito:mockito-core:5.3.1'
-    testImplementation 'org.robolectric:robolectric:4.10.3'
+  testImplementation 'junit:junit:4.13.2'
+  testImplementation 'org.robolectric:robolectric:4.10.3'
 }

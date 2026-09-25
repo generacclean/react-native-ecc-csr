@@ -1,0 +1,16 @@
+{
+  "platforms": [
+    "apple",
+    "android"
+  ],
+  "apple": {
+    "modules": [
+      "CSRModule"
+    ]
+  },
+  "android": {
+    "modules": [
+      "com.ecccsr.CSRModule"
+    ]
+  }
+}

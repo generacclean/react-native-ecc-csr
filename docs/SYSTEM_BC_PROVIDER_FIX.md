@@ -1,5 +1,7 @@
 # System BouncyCastle Provider Conflict Fix
 
+> **Historical (1.x).** The snippets below are from the Java implementation. The fix still applies in 2.0, where it lives in `android/src/main/java/com/ecccsr/CSRCore.kt` (`ensureBouncyCastleProvider`). Line numbers no longer match, and the signing algorithm now comes from `signatureAlgorithmFor(curve)` (SHA-256/384/512 for P-256/384/521) instead of a fixed `SHA256withECDSA`.
+
 ## Issue
 
 The CSR generation was failing with:

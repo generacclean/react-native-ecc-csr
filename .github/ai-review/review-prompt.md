@@ -22,15 +22,15 @@ You are performing an automated code review on a React Native native module libr
 
 3. **Keystore management** — Hardware keystore detection and fallback, Android 12+ TLS compatibility (`PURPOSE_AGREE_KEY`), BouncyCastle provider registration (removing system BC provider), software keystore location (`getNoBackupFilesDir()`) and legacy migration, file permissions (mode 0600), key alias uniqueness, key deletion cleanup.
 
-4. **Native module patterns** — Proper iOS/Android native bridge patterns, promise/callback handling, error propagation from native to JS, lifecycle management, resource disposal in native code.
+4. **Native module patterns** — Idiomatic Expo Modules API usage in Kotlin/Swift (`ModuleDefinition`, `AsyncFunction`, `Record` arguments, `CodedException`/`Exception` error types), promise handling, error-code propagation from native to JS, lifecycle (`OnCreate`/`OnDestroy`), resource disposal in native code.
 
-5. **TypeScript & type safety** — Type definitions accuracy (`index.d.ts`), `any` leaks, missing error types, unsafe casts, proper typing for CSR parameters and results, ECCurve union types.
+5. **TypeScript & type safety** — Type definitions accuracy (`src/index.ts`), `any` leaks, missing error types, unsafe casts, proper typing for CSR parameters and results, ECCurve union types.
 
 6. **Testing** — Adequate unit/integration test coverage for new logic (happy path + edge + error cases), proper mocking of native modules, hardware/software keystore test scenarios, ECC curve validation tests, CSR format verification.
 
 7. **Documentation** — API changes reflected in README, security considerations documented, breaking changes called out, backup configuration warnings, ProGuard rules documented.
 
-8. **Performance** — Unnecessary native bridge crossings, blocking operations, keystore access patterns, BouncyCastle provider initialization overhead, memory management for key material.
+8. **Performance** — Unnecessary JS-to-native calls, blocking operations, keystore access patterns, BouncyCastle provider initialization overhead, memory management for key material.
 
 ## Specific patterns to check
 
@@ -39,7 +39,7 @@ You are performing an automated code review on a React Native native module libr
 The module must intelligently decide between hardware and software keystores:
 - **Hardware keystore requirements**: Android 12+ (API 31) for TLS/ECDH support (`PURPOSE_AGREE_KEY`)
 - **Software keystore fallback**: Android 11 and below automatically use software keystore with warning
-- **At-rest protection**: Software keys live in a plain PKCS12 file inside `getNoBackupFilesDir()` at mode 0600. Application-layer encryption (`EncryptedFile`/Tink) was tried in v1.2.0 and removed in v1.3.0 — a stale Tink keyset after reinstall caused endless key regeneration. Do NOT flag the absence of `EncryptedFile`, of a keystore passphrase, or of `backup_rules.xml`; see the SECURITY RATIONALE comment on `KEYSTORE_PASSWORD` in `CSRModule.java`.
+- **At-rest protection**: Software keys live in a plain PKCS12 file inside `getNoBackupFilesDir()` at mode 0600. Application-layer encryption (`EncryptedFile`/Tink) was tried in v1.2.0 and removed in v1.3.0 — a stale Tink keyset after reinstall caused endless key regeneration. Do NOT flag the absence of `EncryptedFile`, of a keystore passphrase, or of `backup_rules.xml`; see the SECURITY RATIONALE comment on `KEYSTORE_PASSWORD` in `CSRCore.kt`.
 - **TLS compatibility**: `tlsCompatible` flag must accurately reflect device capabilities
 
 Flag any:
