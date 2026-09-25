@@ -108,7 +108,11 @@ const NativeCSRModule = requireNativeModule<CSRModuleInterface>('CSRModule');
 // default. Expo passes them through as null, which Android treats as a present value - an
 // undefined `curve` would be rejected and undefined DN fields would go into the CSR empty.
 // Stripping them here keeps the old semantics; an explicit null is still passed through.
+// Non-object params are handed to native unchanged, so they reject there rather than throw here.
 function withoutUndefined(params: CSRParams): CSRParams {
+  if (params === null || typeof params !== 'object') {
+    return params;
+  }
   return Object.fromEntries(
     Object.entries(params).filter(([, value]) => value !== undefined)
   ) as unknown as CSRParams;

@@ -56,7 +56,8 @@ These do not affect callers that pass a string alias and handle the existing cod
 
 - **New `NATIVE_ERROR` code.** Both platforms reject with it for an unexpected native error that the
   core does not map to a specific code (for example a missing BouncyCastle class on Android).
-  Previously such a promise could stay pending forever.
+  Previously such an error was not turned into a rejection; the Expo adapter now guarantees
+  every call settles.
 - **Alias must be a string.** Passing `null`/`undefined` as `privateKeyAlias` to `keyExists`,
   `deleteKey` or `getPublicKey` is now rejected by Expo's argument validation, with Expo's error
   code, before the library runs.
