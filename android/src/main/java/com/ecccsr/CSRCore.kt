@@ -1569,7 +1569,8 @@ class CSRCore(private val context: Context) {
      * Reads an optional string param. A key that is present keeps its value even when that value is
      * null, and a non-string value throws ClassCastException - both match what ReadableMap's
      * `hasKey ? getString : default` did before the Expo migration, so malformed input still
-     * fails in the same step with the same code.
+     * fails in the same step with the same code. JS `undefined` values are stripped in
+     * src/index.ts before they get here, as the old bridge did, so they still read as absent.
      */
     private fun optString(params: Map<String, *>, key: String, fallback: String?): String? {
       return if (params.containsKey(key)) params[key] as String? else fallback

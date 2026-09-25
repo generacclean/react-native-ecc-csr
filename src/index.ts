@@ -102,6 +102,24 @@ export interface CSRModuleInterface {
 
 // Throws at import if the native module is not linked, rather than handing back undefined and
 // failing later at the first call as NativeModules did.
-const CSRModule = requireNativeModule<CSRModuleInterface>('CSRModule');
+const NativeCSRModule = requireNativeModule<CSRModuleInterface>('CSRModule');
+
+// The old bridge dropped undefined properties, so native saw the key as absent and applied its
+// default. Expo passes them through as null, which Android treats as a present value - an
+// undefined `curve` would be rejected and undefined DN fields would go into the CSR empty.
+// Stripping them here keeps the old semantics; an explicit null is still passed through.
+function withoutUndefined(params: CSRParams): CSRParams {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== undefined)
+  ) as unknown as CSRParams;
+}
+
+const CSRModule: CSRModuleInterface = {
+  generateCSR: (params) => NativeCSRModule.generateCSR(withoutUndefined(params)),
+  getHardwareKeystoreCapabilities: () => NativeCSRModule.getHardwareKeystoreCapabilities(),
+  deleteKey: (privateKeyAlias) => NativeCSRModule.deleteKey(privateKeyAlias),
+  keyExists: (privateKeyAlias) => NativeCSRModule.keyExists(privateKeyAlias),
+  getPublicKey: (privateKeyAlias) => NativeCSRModule.getPublicKey(privateKeyAlias),
+};
 
 export default CSRModule;
