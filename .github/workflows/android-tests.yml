@@ -20,7 +20,7 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      - name: Run CSRModule unit tests
+      - name: Run CSRCore unit tests
         working-directory: android
         run: ./gradlew test --no-daemon
 
