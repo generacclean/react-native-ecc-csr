@@ -10,8 +10,6 @@ import android.security.keystore.StrongBoxUnavailableException
 import android.util.Base64
 import android.util.Log
 
-// Removed EncryptedFile/MasterKey imports - using plain PKCS12 with OS-level security instead
-
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x500.X500NameBuilder
@@ -160,11 +158,8 @@ class CSRCore(private val context: Context) {
     @JvmField val device: String?,
   )
 
-  // Removed MasterKey caching - no longer using EncryptedFile/Tink
-
   init {
     ensureBouncyCastleProvider()
-    // No longer need stale encryption cleanup - using plain PKCS12 files
   }
 
   /**
@@ -499,8 +494,6 @@ class CSRCore(private val context: Context) {
    * Without this, a crash between delete-old and write-new loses ALL stored keys.
    * Pattern: write to .tmp → fsync → atomic rename → final file only updated if successful
    *
-   * Addresses review concern: "Non-atomic rewrite can lose the entire keystore"
-   *
    * Guarantee: by the time this method returns normally, the keystore file at
    * getKeystoreFile()'s path is fully written and in place - callers may read its path
    * immediately afterward without needing to wait for any further completion signal.
@@ -528,6 +521,9 @@ class CSRCore(private val context: Context) {
     FileOutputStream(tempFile).use { fos ->
       setSecureFilePermissions(tempFile)
       keyStore.store(fos, KEYSTORE_PASSWORD)
+      // Flush to disk before the rename: otherwise a power loss can leave the renamed file
+      // pointing at data that was never written.
+      fos.fd.sync()
     }
 
     // Use atomic move on API 26+ for better reliability
@@ -726,10 +722,6 @@ class CSRCore(private val context: Context) {
       return false
     }
   }
-
-  // Encryption at rest using AndroidX EncryptedFile
-  // Removed getEncryptedKeystoreFile() - no longer using EncryptedFile/Tink
-  // Now using plain PKCS12 files with getKeystoreFile(), loadSoftwareKeyStore(), saveSoftwareKeyStore()
 
   // Explicitly set file permissions to mode 0600
   private fun setSecureFilePermissions(file: File) {

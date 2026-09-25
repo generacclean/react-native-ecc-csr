@@ -39,7 +39,7 @@ public class CSRModule: Module {
   }
 
   /// Rejects through `promise.reject(code, message)` rather than by throwing from the closure:
-  /// a thrown error reaches JS wrapped in Expo's FunctionCallException, which replaces our code.
+  /// Expo only keeps the code of errors that are Expo `Exception`s, and `CSRError` is not one.
   private static func settle(_ promise: Promise, _ body: () throws -> Any) {
     do {
       promise.resolve(try body())

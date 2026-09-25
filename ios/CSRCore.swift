@@ -263,13 +263,15 @@ final class CSRCore {
         kSecPrivateKeyAttrs as String: privateKeyAttrs,
       ]
 
-      privateKey = SecKeyCreateRandomKey(secureEnclaveParams as CFDictionary, nil)
+      var enclaveError: Unmanaged<CFError>?
+      privateKey = SecKeyCreateRandomKey(secureEnclaveParams as CFDictionary, &enclaveError)
 
       if privateKey != nil {
         isHardwareBacked = true
         NSLog("✅ P-256 key created in Secure Enclave (hardware-backed)")
       } else {
-        NSLog("⚠️ Secure Enclave failed, falling back to software")
+        let reason = enclaveError.map { String(describing: $0.takeRetainedValue()) } ?? "unknown error"
+        NSLog("⚠️ Secure Enclave failed (%@), falling back to software", reason)
       }
     }
 

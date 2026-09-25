@@ -1,5 +1,7 @@
 # Release Notes - Hardware Keystore Fix & Software Keystore Implementation
 
+> **Historical (1.0.3).** Since 2.0 the CSR digest follows the curve, so a P-384 CSR is signed with `ecdsa-with-SHA384` rather than SHA-256. See `RELEASE_NOTES_v2.0.0-beta.1.md`.
+
 ## Version 1.0.3
 
 ### 🎉 Major Improvements

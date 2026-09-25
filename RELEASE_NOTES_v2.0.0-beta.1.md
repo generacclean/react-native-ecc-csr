@@ -139,7 +139,7 @@ still passed through as before.
 
 ## 🧪 Testing
 
-73 JVM unit tests (Robolectric), no emulator required. The suite now calls `CSRCore` directly
+74 JVM unit tests (Robolectric), no emulator required. The suite now calls `CSRCore` directly
 (`CSRModuleTest` → `CSRCoreTest`), so it needs neither React Native nor Expo, and the CI job runs it
 standalone. `CSRModule.kt` is excluded from the standalone build because `expo-modules-core` only
 exists inside a consuming app.
