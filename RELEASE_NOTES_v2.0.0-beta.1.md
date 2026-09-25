@@ -12,7 +12,7 @@ Version 2.0.0 moves the library from the React Native bridge to
 (from Java) and Swift (from Objective-C).
 
 The JS API, key aliases and key storage locations are unchanged; error codes are unchanged apart
-from the additions in Breaking Changes §4 and §5. Keys created by 1.x
+from the changes in Breaking Changes §4–§6. Keys created by 1.x
 are found after upgrading and no re-enrolment is needed. What changes is how the module is linked,
 and the minimum platform versions.
 
@@ -62,11 +62,14 @@ These do not affect callers that pass a string alias and handle the existing cod
 - **Alias must be a string.** Passing `null`/`undefined` as `privateKeyAlias` to `keyExists`,
   `deleteKey` or `getPublicKey` is now rejected by Expo's argument validation, with Expo's error
   code, before the library runs.
-- **iOS:** `KEY_EXISTS_ERROR`, `DELETE_KEY_ERROR` and `CAPABILITIES_ERROR` are no longer produced.
-  They were only raised from `@catch (NSException *)` blocks around Keychain calls that report
-  failure through `OSStatus` and never throw, so they were unreachable. Android still produces all
-  of its codes, `KEY_EXISTS_ERROR` included.
-- **iOS:** rejections no longer attach the underlying `NSError`. Codes and messages are unchanged.
+- **iOS:** `DELETE_KEY_ERROR` and `CAPABILITIES_ERROR` are no longer produced. They were only
+  raised from `@catch (NSException *)` blocks around Keychain calls that report failure through
+  `OSStatus` and never throw, so they were unreachable. `KEY_EXISTS_ERROR` is still produced, now
+  from the `OSStatus` (see §6).
+- **iOS:** rejections no longer attach the underlying `NSError`.
+- **Messages carry Expo's prefix.** Expo wraps every rejection, so `error.message` now reads
+  `Call to function 'CSRModule.<name>' has been rejected.\n→ Caused by: <message>`. `error.code`
+  is unchanged. Match on `code`, not on the message text.
 
 ### 5. CSR signatures and input validation now match across platforms
 
@@ -89,9 +92,34 @@ These do not affect callers that pass a string alias and handle the existing cod
   instead of `KEY_NOT_FOUND`. `KEY_NOT_FOUND` now means only that no key exists under the alias,
   so it can safely trigger re-enrolment.
 
+### 6. `null` params, wrong-typed params and Keychain errors
+
+- **`null` means "not provided" on both platforms.** An absent, `undefined` or `null` param now
+  takes its default. Previously Android treated `null` as a value: a `null` `curve` rejected with
+  `INVALID_CURVE` and `null` subject fields went into the CSR empty. iOS already applied defaults.
+- **Wrong-typed params are rejected by Expo** before the library runs, with Expo's own code
+  (`ERR_*`, e.g. a number passed as `commonName`). The iOS `EXCEPTION` code is gone, and Android no
+  longer rejects these with `CSR_GENERATION_ERROR`.
+- **iOS `keyExists` rejects with `KEY_EXISTS_ERROR`** when the Keychain lookup fails for any
+  reason other than "no such item" (for example `errSecInteractionNotAllowed` while the device is
+  locked). 1.x resolved `false`, which a caller could not tell apart from a missing key. **Treat
+  `KEY_EXISTS_ERROR` as "unknown" and retry later - do not re-enrol on it**, or an unreadable
+  Keychain would replace a key that is still enrolled. Android already rejected with this code.
+- **iOS `getPublicKey` rejects a missing key with `KEY_NOT_FOUND`** instead of
+  `GET_PUBLIC_KEY_ERROR`, matching Android. `GET_PUBLIC_KEY_ERROR` now means the key exists but
+  could not be read.
+
 ---
 
 ## 🚀 What's New
+
+### `warnings` on `CSRResult` (Android)
+
+Before generating a key, Android removes any key left under the alias in the other keystore
+(software vs hardware). 1.x only logged a failure there and carried on, leaving two keys under one
+alias. `CSRResult` now has an optional `warnings: string[]` that reports it, with an entry starting
+`STALE_KEY_CLEANUP_FAILED`. The new key and CSR are valid; call `deleteKey` to retry the cleanup.
+The field is absent when there is nothing to report, and never present on iOS.
 
 ### Adapter + core split
 
@@ -103,12 +131,13 @@ JS (src/index.ts)
    ▼
 CSRModule.kt / CSRModule.swift   ← thin Expo adapter, no logic
    ▼
-CSRCore.kt / CSRCore.swift       ← all behaviour, no React Native or Expo dependency
+CSRCore.kt / CSRCore.swift       ← all behaviour
 ```
 
-The adapter converts arguments, runs each call on a dedicated serial queue/executor, and turns
-results and errors into promise resolutions/rejections. `CSRCore` holds all crypto and key storage
-logic and can be tested without an app.
+The adapter only runs each call on a dedicated serial queue/thread. `CSRCore` holds all crypto and
+key storage logic and can be tested without an app. It takes and returns Expo `Record` types
+(`CSRParams`, `CSRResult`, ...) and throws Expo coded exceptions (`CSRException` / `CSRError`), so
+Expo does the argument conversion and promise settling and both platforms share one error model.
 
 ### Kotlin and Swift ports
 
@@ -125,11 +154,9 @@ logic and can be tested without an app.
 
 ### `undefined` params keep their defaults
 
-The RN bridge dropped `undefined` properties, so the native side applied its defaults. Expo passes
-them through as `null`, which Android would have treated as a real value (an undefined `curve` was
-rejected, undefined subject fields went into the CSR empty). `generateCSR` now strips `undefined`
-keys before calling native, which keeps the 1.x behaviour on both platforms. An explicit `null` is
-still passed through as before.
+The RN bridge dropped `undefined` properties, so the native side applied its defaults. `CSRParams`
+is now a typed Expo `Record` whose fields are all optional, so `undefined` (and `null`, see
+Breaking Changes §6) still gets the default on both platforms.
 
 ### Podspec moved to `ios/`
 
@@ -139,8 +166,8 @@ still passed through as before.
 
 ## 🧪 Testing
 
-74 JVM unit tests (Robolectric, now in Kotlin), no emulator required. The suite now calls `CSRCore`
-directly (`CSRModuleTest` → `CSRCoreTest`). iOS gains 16 XCTests (`ios/Tests/`) covering validation,
+75 JVM unit tests (Robolectric, now in Kotlin), no emulator required. The suite now calls `CSRCore`
+directly (`CSRModuleTest` → `CSRCoreTest`). iOS gains 15 XCTests (`ios/Tests/`) covering validation,
 the signature digest per curve and the Keychain lifecycle, run on a simulator inside an app host.
 CI runs both suites through the example app in `example/`, which also builds both platforms (so the
 Kotlin and Swift adapters compile against Expo SDK 55), type-checks the TypeScript and lints the
@@ -158,7 +185,8 @@ Manual verification (installer-app):
 2. Point the dependency at the new version, then run `yarn install` and `npx expo prebuild --clean`
 3. Remove any manual linking of this package (`react-native.config.js` overrides, `Podfile` entries,
    `MainApplication` package registration) if the app added one
-4. If you match on `error.code`, see Breaking Changes §4
+4. If you match on `error.code` or pass `null` params, see Breaking Changes §4 and §6. In
+   particular, handle `KEY_EXISTS_ERROR` from `keyExists` on iOS as "unknown", not "missing"
 5. Verify on device: install the 1.x build and enrol, then install this build over it without
    uninstalling. `keyExists` should return `true` and the existing certificate should still connect
 
@@ -172,6 +200,9 @@ Manual verification (installer-app):
 - The Expo adapter (`CSRModule.kt` / `CSRModule.swift`) is not covered by unit tests
 - iOS software keys created by 1.x remain backup-eligible until they are regenerated (see
   Breaking Changes §5)
+- **Deferred from the IA-5752 acceptance criteria:** the device/OS integration matrix (Android API
+  21–35, iOS 13–17) and a performance comparison against the legacy bridge. Neither has been
+  run yet; both must be done, or explicitly deferred in the ticket, before 2.0.0 leaves beta
 
 ---
 

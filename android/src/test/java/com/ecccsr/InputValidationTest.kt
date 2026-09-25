@@ -12,7 +12,7 @@ import org.robolectric.RuntimeEnvironment
 
 /**
  * Unit tests for input validation. Every assertion delegates to the real CSRCore
- * validator (isValidIPAddress / isValidCurve / isValidAlias / sanitizeDNValue) rather
+ * validator (isValidIPAddress / Curve.fromName / isValidAlias / sanitizeDNValue) rather
  * than re-declaring the logic, so these tests fail if production behavior changes.
  */
 @RunWith(RobolectricTestRunner::class)
@@ -127,7 +127,7 @@ class InputValidationTest {
     assertFalse("empty should be invalid", isValidCurve(""))
   }
 
-  private fun isValidCurve(curve: String?): Boolean = module.isValidCurve(curve)
+  private fun isValidCurve(curve: String?): Boolean = Curve.fromName(curve) != null
 
   @Test
   fun testAliasValidation() {

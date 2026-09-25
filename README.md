@@ -141,6 +141,9 @@ interface CSRResult {
                                    // compatibility (see CSRKeystoreDescriptor in src/index.ts)
     format: 'pkcs12';
   };
+  warnings?: string[];            // Android only. Non-fatal problems, absent when there are none.
+                                   // "STALE_KEY_CLEANUP_FAILED: ..." means an old key under this
+                                   // alias could not be removed; call deleteKey to retry.
 }
 ```
 
@@ -166,6 +169,9 @@ Generates a Certificate Signing Request with the specified parameters.
 | `phoneInfo`          | string  | No       | ""            | PhoneInfo                                           |
 | `privateKeyAlias`    | string  | Yes      | -             | Unique alias for the key pair                       |
 | `useHardwareKey`     | boolean | No       | false         | Request hardware keystore (module decides final)    |
+
+An omitted, `undefined` or `null` parameter takes its default. A parameter of the wrong type is
+rejected by Expo with an `ERR_*` code before the CSR is generated.
 
 #### Returns
 
@@ -195,11 +201,15 @@ Deletes a key from both hardware and software keystores.
 
 ### `keyExists(privateKeyAlias: string): Promise<boolean>`
 
-Checks if a key exists in either hardware or software keystore.
+Checks if a key exists in either hardware or software keystore. Rejects with `KEY_EXISTS_ERROR`
+when the keystore cannot be read (on iOS, for example, while the device is locked). Treat that as
+"unknown", not as "missing": re-enrolling on it would replace a key that may still be enrolled.
 
 ### `getPublicKey(privateKeyAlias: string): Promise<string>`
 
-Retrieves the public key for a given alias from either keystore.
+Retrieves the public key for a given alias from either keystore. Rejects with `KEY_NOT_FOUND`
+when there is no key under the alias, and `GET_PUBLIC_KEY_ERROR` when there is one but it cannot
+be read.
 
 ## Supported Curves
 
@@ -339,10 +349,11 @@ manual linking the app added for 1.x: `react-native.config.js` overrides, `Podfi
 
 ## Architecture
 
-Each platform has an RN/Expo-free core that holds all behaviour, and a thin Expo module that
-exposes it to JS as `CSRModule`:
+Each platform has a core that holds all behaviour, and a thin Expo module that exposes it to JS as
+`CSRModule`. The core takes and returns Expo `Record` types and throws Expo coded exceptions, so
+Expo converts the arguments and settles the promises; the module only picks the thread:
 
-| | Core (all logic, error codes, response shape) | Expo module (argument/promise adapter) |
+| | Core (all logic, error codes, response shape) | Expo module (moves calls to its queue) |
 |---|---|---|
 | Android | `android/src/main/java/com/ecccsr/CSRCore.kt` | `android/src/main/java/com/ecccsr/CSRModule.kt` |
 | iOS | `ios/CSRCore.swift` | `ios/CSRModule.swift` |
@@ -359,9 +370,10 @@ slow key generation cannot stall other modules' async calls.
 
 These are automatically included by the module as transitive dependencies.
 
-**No React Native compile dependency:** `CSRCore` uses only Android and BouncyCastle APIs. The
-Kotlin Expo glue gets `expo-modules-core` through `expo-module-gradle-plugin`, which only resolves
-inside an app, so the module is built and tested through the example app in `example/`.
+**No React Native compile dependency:** `CSRCore` uses Android, BouncyCastle and
+`expo-modules-core` APIs only (the last for `Record` and `CodedException`). The module gets
+`expo-modules-core` through `expo-module-gradle-plugin`, which only resolves inside an app, so the
+module is built and tested through the example app in `example/`.
 
 ## Testing
 

@@ -1,3 +1,4 @@
+import ExpoModulesCore
 import Security
 import XCTest
 
@@ -17,49 +18,70 @@ final class CSRCoreTests: XCTestCase {
     super.tearDown()
   }
 
-  private func params(_ overrides: [String: Any] = [:]) -> [String: Any] {
-    ["commonName": "test-device", "privateKeyAlias": alias].merging(overrides) { $1 }
+  private func params(_ configure: (inout CSRParams) -> Void = { _ in }) -> CSRParams {
+    var params = CSRParams()
+    params.commonName = "test-device"
+    params.privateKeyAlias = alias
+    configure(&params)
+    return params
+  }
+
+  /// Converts `dict` the way Expo converts a JS object argument.
+  private func params(from dict: [String: Any]) throws -> CSRParams {
+    try CSRParams(from: dict, appContext: AppContext())
   }
 
   // MARK: - Validation
 
   func testMissingCommonNameIsRejected() {
-    assertRejects("INVALID_PARAM", params(["commonName": ""]))
+    assertRejects("INVALID_PARAM", params { $0.commonName = "" })
   }
 
   func testMissingAliasIsRejected() {
-    assertRejects("INVALID_PARAM", ["commonName": "test-device"])
-    assertRejects("INVALID_PARAM", params(["privateKeyAlias": ""]))
+    assertRejects("INVALID_PARAM", params { $0.privateKeyAlias = nil })
+    assertRejects("INVALID_PARAM", params { $0.privateKeyAlias = "" })
   }
 
   func testUnknownCurveIsRejected() {
-    assertRejects("INVALID_CURVE", params(["curve": "secp192r1"]))
+    assertRejects("INVALID_CURVE", params { $0.curve = "secp192r1" })
   }
 
   func testInvalidIPAddressIsRejected() {
     for ip in ["not-an-ip", "256.1.1.1", "10.10.10", "example.com"] {
-      assertRejects("INVALID_IP", params(["ipAddress": ip]), ip)
+      assertRejects("INVALID_IP", params { $0.ipAddress = ip }, ip)
     }
   }
 
-  func testNonStringParamIsRejected() {
-    assertRejects("EXCEPTION", params(["commonName": 42]))
-    assertRejects("EXCEPTION", params(["curve": ["secp256r1"]]))
-  }
-
-  func testNonBooleanUseHardwareKeyIsRejected() {
-    assertRejects("EXCEPTION", params(["useHardwareKey": ["yes"]]))
+  func testWrongTypedParamIsRejectedByTheConverter() {
+    XCTAssertThrowsError(try params(from: ["commonName": ["test-device"], "privateKeyAlias": alias]))
+    XCTAssertThrowsError(try params(from: ["commonName": "test-device", "useHardwareKey": ["yes"]]))
   }
 
   func testRejectedParamsStoreNoKey() {
-    assertRejects("INVALID_IP", params(["ipAddress": "not-an-ip"]))
-    XCTAssertFalse(core.keyExists(alias))
+    assertRejects("INVALID_IP", params { $0.ipAddress = "not-an-ip" })
+    XCTAssertFalse(try core.keyExists(alias))
   }
 
+  /// Expo hands a JS object to the converter with `null` properties as NSNull and `undefined` ones
+  /// dropped (EXJSIConversions.mm). Both must mean "not provided", as they do on Android.
   func testNullParamsTakeDefaults() throws {
-    let result = try core.generateCSR(params(["curve": NSNull(), "ipAddress": NSNull()]))
-    let csr = try CSR(pem: result["csr"] as? String)
+    let converted = try params(from: [
+      "commonName": "test-device",
+      "privateKeyAlias": alias,
+      "curve": NSNull(),
+      "country": NSNull(),
+      "ipAddress": NSNull(),
+      "useHardwareKey": NSNull(),
+    ])
+    XCTAssertNil(converted.curve)
+    XCTAssertNil(converted.country)
+    XCTAssertNil(converted.ipAddress)
+    XCTAssertNil(converted.useHardwareKey)
+
+    let result = try core.generateCSR(converted)
+    let csr = try CSR(pem: result.csr)
     XCTAssertEqual(csr.signatureAlgorithmOID, "1.2.840.10045.4.3.3", "Default curve is P-384")
+    XCTAssertFalse(result.hardwareKeyRequested)
   }
 
   // MARK: - Signature digest per curve
@@ -77,29 +99,30 @@ final class CSRCoreTests: XCTestCase {
   }
 
   func testResultShape() throws {
-    let result = try core.generateCSR(params())
+    let result = try core.generateCSR(params()).toDictionary(appContext: nil)
     XCTAssertEqual(result["privateKeyAlias"] as? String, alias)
     XCTAssertEqual(result["isHardwareBacked"] as? Bool, false)
     XCTAssertEqual(result["useHardwareKey"] as? Bool, false)
     XCTAssertEqual(result["hardwareKeyRequested"] as? Bool, false)
     XCTAssertEqual(result["tlsCompatible"] as? Bool, true)
     XCTAssertNil(result["keystore"], "iOS keys live in the Keychain, not a file")
+    XCTAssertTrue((result["csr"] as? String)?.hasPrefix("-----BEGIN CERTIFICATE REQUEST-----\n") ?? false)
     XCTAssertTrue((result["publicKey"] as? String)?.hasPrefix("-----BEGIN PUBLIC KEY-----\n") ?? false)
   }
 
   // MARK: - Keychain lifecycle
 
   func testKeyLifecycle() throws {
-    XCTAssertFalse(core.keyExists(alias))
+    XCTAssertFalse(try core.keyExists(alias))
 
     let result = try core.generateCSR(params())
-    XCTAssertTrue(core.keyExists(alias))
-    XCTAssertEqual(try core.getPublicKey(alias), result["publicKey"] as? String)
+    XCTAssertTrue(try core.keyExists(alias))
+    XCTAssertEqual(try core.getPublicKey(alias), result.publicKey)
 
     XCTAssertTrue(core.deleteKey(alias))
-    XCTAssertFalse(core.keyExists(alias))
+    XCTAssertFalse(try core.keyExists(alias))
     XCTAssertThrowsError(try core.getPublicKey(alias)) { error in
-      XCTAssertEqual((error as? CSRError)?.code, "GET_PUBLIC_KEY_ERROR")
+      XCTAssertEqual((error as? CSRError)?.code, "KEY_NOT_FOUND")
     }
   }
 
@@ -108,10 +131,10 @@ final class CSRCoreTests: XCTestCase {
   }
 
   func testRegeneratingReplacesTheKey() throws {
-    _ = try core.generateCSR(params(["curve": "secp256r1"]))
-    let second = try core.generateCSR(params(["curve": "secp384r1"]))
+    _ = try core.generateCSR(params { $0.curve = "secp256r1" })
+    let second = try core.generateCSR(params { $0.curve = "secp384r1" })
 
-    XCTAssertEqual(try core.getPublicKey(alias), second["publicKey"] as? String)
+    XCTAssertEqual(try core.getPublicKey(alias), second.publicKey)
 
     // Exactly one key is left under the alias.
     let query: [String: Any] = [
@@ -143,7 +166,7 @@ final class CSRCoreTests: XCTestCase {
   // MARK: - Helpers
 
   private func assertRejects(
-    _ code: String, _ params: [String: Any], _ context: String = "",
+    _ code: String, _ params: CSRParams, _ context: String = "",
     file: StaticString = #filePath, line: UInt = #line
   ) {
     XCTAssertThrowsError(try core.generateCSR(params), context, file: file, line: line) { error in
@@ -155,11 +178,11 @@ final class CSRCoreTests: XCTestCase {
     curve: String, oid: String, verifyWith algorithm: SecKeyAlgorithm,
     file: StaticString = #filePath, line: UInt = #line
   ) throws {
-    let result = try core.generateCSR(params(["curve": curve]))
-    let csr = try CSR(pem: result["csr"] as? String)
+    let result = try core.generateCSR(params { $0.curve = curve })
+    let csr = try CSR(pem: result.csr)
     XCTAssertEqual(csr.signatureAlgorithmOID, oid, file: file, line: line)
 
-    let publicKey = try publicKey(fromPEM: result["publicKey"] as? String)
+    let publicKey = try publicKey(fromPEM: result.publicKey)
     var error: Unmanaged<CFError>?
     let valid = SecKeyVerifySignature(
       publicKey, algorithm, csr.certificationRequestInfo as CFData, csr.signature as CFData, &error)

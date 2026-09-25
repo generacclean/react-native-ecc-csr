@@ -31,7 +31,7 @@ import java.util.Base64
 /**
  * Unit tests for CSRCore that exercise the real production code: the entry points the Expo module
  * calls, and generateCSRInternal / getHardwareKeystoreCapabilitiesInternal where a test needs the
- * typed result or exception rather than a reply.
+ * typed result or the underlying exception rather than the CSRException.
  */
 @RunWith(RobolectricTestRunner::class)
 class CSRCoreTest {
@@ -66,15 +66,10 @@ class CSRCoreTest {
     ReflectionHelpers.setStaticField(Build.VERSION::class.java, "SDK_INT", originalSdkInt)
   }
 
-  private fun paramsFor(alias: String, curve: String?): MutableMap<String, Any> {
-    val params = mutableMapOf<String, Any>(
-      "commonName" to "test-device",
-      "privateKeyAlias" to alias,
-    )
-    if (curve != null) {
-      params["curve"] = curve
-    }
-    return params
+  private fun paramsFor(alias: String, curve: String?) = CSRParams().apply {
+    commonName = "test-device"
+    privateKeyAlias = alias
+    this.curve = curve
   }
 
   // ---- CSR generation: valid, parseable CSR with the expected DN, per curve ----
@@ -82,8 +77,8 @@ class CSRCoreTest {
   @Test
   fun testGenerateCSRForP256ProducesParseableCSRWithExpectedDN() {
     val params = paramsFor("alias-p256", "secp256r1")
-    params["country"] = "US"
-    params["organization"] = "Generac Power Systems"
+    params.country = "US"
+    params.organization = "Generac Power Systems"
 
     val result = module.generateCSRInternal(params)
 
@@ -164,31 +159,31 @@ class CSRCoreTest {
     val alias = "lifecycle-alias-${System.identityHashCode(this)}"
     module.generateCSRInternal(paramsFor(alias, "secp256r1"))
 
-    assertEquals(true, settle { module.keyExists(alias, it) }.value())
+    assertEquals(true, settle { module.keyExists(alias) }.value())
 
-    val publicKey = settle { module.getPublicKey(alias, it) }.value()
+    val publicKey = settle { module.getPublicKey(alias) }.value()
     assertNotNull(publicKey)
     // Must be valid base64
     Base64.getDecoder().decode(publicKey as String)
 
-    assertEquals(true, settle { module.deleteKey(alias, it) }.value())
+    assertEquals(true, settle { module.deleteKey(alias) }.value())
 
-    assertEquals(false, settle { module.keyExists(alias, it) }.value())
+    assertEquals(false, settle { module.keyExists(alias) }.value())
   }
 
   @Test
   fun testKeyExistsForUnknownAliasResolvesFalse() {
-    assertEquals(false, settle { module.keyExists("never-created-alias", it) }.value())
+    assertEquals(false, settle { module.keyExists("never-created-alias") }.value())
   }
 
   @Test
   fun testGetPublicKeyForUnknownAliasRejects() {
-    settle { module.getPublicKey("never-created-alias", it) }.rejected("KEY_NOT_FOUND")
+    settle { module.getPublicKey("never-created-alias") }.rejected("KEY_NOT_FOUND")
   }
 
   @Test
   fun testDeleteKeyForUnknownAliasResolvesFalse() {
-    assertEquals(false, settle { module.deleteKey("never-created-alias", it) }.value())
+    assertEquals(false, settle { module.deleteKey("never-created-alias") }.value())
   }
 
   // ---- Software keystore round-trip: write then load back ----
@@ -249,7 +244,7 @@ class CSRCoreTest {
     )
 
     // Any keystore access must relocate the file and leave the key usable.
-    val outcome = settle { module.keyExists(alias, it) }
+    val outcome = settle { module.keyExists(alias) }
 
     assertEquals("migrated keystore must still contain the key", true, outcome.value())
     assertTrue("keystore should have been migrated into no-backup storage", current.exists())
@@ -307,7 +302,7 @@ class CSRCoreTest {
     assertTrue("staging requires both copies to exist", current.exists() && legacy.exists())
     assertTrue(current.setLastModified(legacy.lastModified() - 60_000L))
 
-    val outcome = settle { module.keyExists(ROLLED_BACK_ALIAS, it) }
+    val outcome = settle { module.keyExists(ROLLED_BACK_ALIAS) }
 
     assertEquals(
       "the newer legacy keystore must win, not be deleted as stale",
@@ -353,7 +348,7 @@ class CSRCoreTest {
       current.lastModified(),
     )
 
-    val outcome = settle { module.keyExists(ROLLED_BACK_ALIAS, it) }
+    val outcome = settle { module.keyExists(ROLLED_BACK_ALIAS) }
 
     // A tie is unresolvable from the filesystem, so neither key may be discarded: the legacy copy
     // becomes live and the no-backup copy is kept for forensics.
@@ -425,7 +420,7 @@ class CSRCoreTest {
   fun testNoBackupDirUnavailableMakesKeyExistsRejectInsteadOfAnsweringFalse() {
     context.noBackupFilesDirUnavailable = true
 
-    val outcome = settle { module.keyExists("some-alias", it) }
+    val outcome = settle { module.keyExists("some-alias") }
 
     // The software-keystore branch normally swallows failures and resolves false. Doing that
     // when storage itself is unreachable would tell the app its key is gone, and the app would
@@ -438,7 +433,7 @@ class CSRCoreTest {
   fun testNoBackupDirUnavailableMakesGetPublicKeyRejectInsteadOfReportingKeyNotFound() {
     context.noBackupFilesDirUnavailable = true
 
-    val outcome = settle { module.getPublicKey("some-alias", it) }
+    val outcome = settle { module.getPublicKey("some-alias") }
 
     // KEY_NOT_FOUND is the answer for "this alias has no key", and an app is entitled to
     // re-enrol on it. Unreachable storage is not that, so it has to arrive as a distinct error.
@@ -449,7 +444,7 @@ class CSRCoreTest {
   fun testNoBackupDirUnavailableMakesDeleteKeyRejectInsteadOfResolvingFalse() {
     context.noBackupFilesDirUnavailable = true
 
-    val outcome = settle { module.deleteKey("some-alias", it) }
+    val outcome = settle { module.deleteKey("some-alias") }
 
     // Resolving false would read as "there was nothing to delete" when in fact the keystore was
     // never reached and a key may well still be in it.
@@ -468,7 +463,7 @@ class CSRCoreTest {
     context.noBackupFilesDirUnavailable = true
 
     val params = paramsFor("hardware-path-alias", "secp256r1")
-    params["useHardwareKey"] = true
+    params.useHardwareKey = true
 
     assertThrows(CSRCore.KeystoreLocationException::class.java) {
       module.generateCSRInternal(params)
@@ -499,7 +494,7 @@ class CSRCoreTest {
     assertTrue("the only copy of the key must be left intact for the next attempt", legacy.exists())
 
     // Same for the read paths that would otherwise answer "no key here".
-    val outcome = settle { module.keyExists(alias, it) }
+    val outcome = settle { module.keyExists(alias) }
     assertTrue("a stranded legacy keystore must reject, not resolve false", outcome is Outcome.Rejected)
   }
 
@@ -685,33 +680,48 @@ class CSRCoreTest {
   @Test
   fun testGenerateCSRWithInvalidIPAddressIsRejected() {
     val params = paramsFor("bad-ip-alias", "secp256r1")
-    params["ipAddress"] = "not-a-hostname-or-ip!!"
+    params.ipAddress = "not-a-hostname-or-ip!!"
 
-    settle { module.generateCSR(params, it) }.rejected("INVALID_IP")
+    settle { module.generateCSR(params) }.rejected("INVALID_IP")
   }
 
   @Test
   fun testGenerateCSRWithMissingAliasIsRejected() {
-    val params = mapOf("commonName" to "test-device")
+    val params = CSRParams().apply { commonName = "test-device" }
 
-    settle { module.generateCSR(params, it) }.rejected("MISSING_ALIAS")
+    settle { module.generateCSR(params) }.rejected("MISSING_ALIAS")
   }
 
   @Test
   fun testGenerateCSRWithInvalidCurveIsRejected() {
     val params = paramsFor("bad-curve-alias", "secp256k1")
 
-    settle { module.generateCSR(params, it) }.rejected("INVALID_CURVE")
+    settle { module.generateCSR(params) }.rejected("INVALID_CURVE")
   }
 
   @Test
-  fun testGenerateCSRWithNonStringParamIsRejectedWithGenericCode() {
-    // Pins the ReadableMap-era behaviour optString preserves: a wrongly-typed param fails CSR
-    // generation as a whole rather than being coerced or silently replaced by the default.
-    val params = paramsFor("non-string-param-alias", "secp256r1")
-    params["country"] = 42.0
+  fun testGenerateCSRTreatsNullParamsAsNotProvided() {
+    // Expo leaves a Record field at its null default for an absent or undefined property, and
+    // sets it to null for an explicit JS null. All three must take the default, as on iOS.
+    val params = paramsFor("null-params-alias", null)
+    params.country = null
+    params.ipAddress = null
 
-    settle { module.generateCSR(params, it) }.rejected("CSR_GENERATION_ERROR")
+    val csr = parseCSR(module.generateCSRInternal(params).csr)
+    assertTrue(csr.subject.toString().contains("C=US"))
+    assertEquals("default curve is P-384", "1.2.840.10045.4.3.3", csr.signatureAlgorithm.algorithm.id)
+  }
+
+  @Test
+  fun testGenerateCSRReportsAFailedStaleKeyCleanupAsAWarning() {
+    // Robolectric has no AndroidKeyStore provider, so removing a stale hardware key under this
+    // alias fails. Generation carries on into the software keystore, but the caller is told a
+    // stale key may have survived rather than only finding it in logcat.
+    val response = settle { module.generateCSR(paramsFor("stale-cleanup-alias", "secp256r1")) }.map()
+
+    val warnings = response["warnings"] as List<*>?
+    assertNotNull("a failed stale-key cleanup must be reported", warnings)
+    assertTrue(warnings!!.single().toString().startsWith(CSRCore.STALE_KEY_CLEANUP_FAILED))
   }
 
   @Test
@@ -720,7 +730,7 @@ class CSRCoreTest {
     // the other tests exercise.
     val params = paramsFor("response-descriptor-alias", "secp256r1")
 
-    val response = settle { module.generateCSR(params, it) }.map()
+    val response = settle { module.generateCSR(params) }.map()
     assertTrue(
       "response must include a keystore map for a software-backed key",
       response.containsKey("keystore"),
@@ -771,7 +781,7 @@ class CSRCoreTest {
     // canUseHardwareKeysForTLS() requires API 31+, so API 30 forces software fallback.
     ReflectionHelpers.setStaticField(Build.VERSION::class.java, "SDK_INT", 30)
     val params = paramsFor("hw-fallback-alias", "secp256r1")
-    params["useHardwareKey"] = true
+    params.useHardwareKey = true
 
     val result = module.generateCSRInternal(params)
 

@@ -79,33 +79,15 @@ import java.util.Locale
 private fun String.trimJava(): String = trim { it <= ' ' }
 
 /**
- * ECC key pair and CSR generation, with no dependency on React Native or Expo.
+ * ECC key pair and CSR generation, with no dependency on React Native. From Expo it uses only the
+ * [CSRParams] record and [CSRException]'s base class.
  *
- * The JS-facing module is the Expo module in `CSRModule.kt`, which only adapts arguments and
- * promises. Everything that decides behaviour - validation, key storage, error codes, response
- * shape - lives here so it stays unit-testable on a plain Robolectric [Context].
- *
- * Members documented as visible for tests are public rather than `internal`: the tests are Java,
- * and Kotlin mangles the JVM names of internal functions, so Java cannot call them by name.
+ * The JS-facing module is the Expo module in `CSRModule.kt`, which only moves calls onto its
+ * thread. Everything that decides behaviour - validation, key storage, error codes, response
+ * shape - lives here so it stays unit-testable on a plain Robolectric [Context]. Every entry point
+ * either returns the value to resolve with or throws a [CSRException].
  */
 class CSRCore(private val context: Context) {
-
-  /**
-   * Where an entry point reports its outcome. Implemented by the Expo module over its promise,
-   * and by tests to capture the outcome synchronously.
-   *
-   * Each entry point calls exactly one of these exactly once. The codes passed to reject are
-   * part of the JS contract (callers match on `error.code`), so treat them as API.
-   */
-  interface Reply {
-    fun resolve(value: Any?)
-
-    fun reject(code: String, message: String?, cause: Throwable?)
-
-    fun reject(code: String, message: String?) {
-      reject(code, message, null)
-    }
-  }
 
   /**
    * The software keystore's location could not be established: either no-backup storage is
@@ -127,9 +109,6 @@ class CSRCore(private val context: Context) {
     constructor(message: String, cause: Throwable) : super(message, cause)
   }
 
-  /** Thrown for validation failures that should be surfaced to JS as a specific error code. */
-  internal class CSRRejectedException(val code: String, message: String) : Exception(message)
-
   /**
    * Typed result of a CSR generation; [generateCSR] maps it for JS.
    *
@@ -144,6 +123,7 @@ class CSRCore(private val context: Context) {
     val hardwareKeyRequested: Boolean,
     val tlsCompatible: Boolean,
     val keystorePath: String?, // null when useHardwareKey is true
+    val warnings: List<String>,
   )
 
   /** Typed result of a capability check; [getHardwareKeystoreCapabilities] maps it for JS. */
@@ -600,7 +580,7 @@ class CSRCore(private val context: Context) {
   }
 
   @Throws(Exception::class)
-  private fun createSelfSignedCertificate(keyPair: KeyPair, subjectDN: String, keystoreCurve: String): X509Certificate {
+  private fun createSelfSignedCertificate(keyPair: KeyPair, subjectDN: String, curve: Curve): X509Certificate {
     val now = System.currentTimeMillis()
     val startDate = Date(now)
     val endDate = Date(now + 365L * 24 * 60 * 60 * 1000)
@@ -611,25 +591,13 @@ class CSRCore(private val context: Context) {
 
     val certBuilder = X509v3CertificateBuilder(subject, serialNumber, startDate, endDate, subject, publicKeyInfo)
 
-    val signer = JcaContentSignerBuilder(signatureAlgorithmFor(keystoreCurve))
+    val signer = JcaContentSignerBuilder(curve.signatureAlgorithm)
       .setProvider(FULL_BC_PROVIDER)
       .build(keyPair.private)
 
     return JcaX509CertificateConverter()
       .setProvider(FULL_BC_PROVIDER)
       .getCertificate(certBuilder.build(signer))
-  }
-
-  /**
-   * Matches the digest to the curve's security level. Hardware keys are generated with all three
-   * digests allowed (see generateHardwareKeyPair), so this holds for both key paths.
-   */
-  private fun signatureAlgorithmFor(keystoreCurve: String): String {
-    return when (keystoreCurve) {
-      "secp384r1" -> "SHA384withECDSA"
-      "secp521r1" -> "SHA512withECDSA"
-      else -> "SHA256withECDSA"
-    }
   }
 
   private fun canUseHardwareKeysForTLS(): Boolean {
@@ -643,14 +611,6 @@ class CSRCore(private val context: Context) {
    */
   internal fun isValidAlias(alias: String?): Boolean {
     return alias != null && alias.trimJava().isNotEmpty()
-  }
-
-  /**
-   * Visible for tests, so they assert against the same curve allow-list generateCSRInternal
-   * enforces, rather than a copy that can drift from production.
-   */
-  internal fun isValidCurve(curve: String?): Boolean {
-    return curve == "secp256r1" || curve == "secp384r1" || curve == "secp521r1"
   }
 
   /**
@@ -749,7 +709,7 @@ class CSRCore(private val context: Context) {
     return value?.trimJava() ?: ""
   }
 
-  fun generateCSR(params: Map<String, *>, promise: Reply) {
+  fun generateCSR(params: CSRParams): Map<String, Any?> {
     try {
       val result = generateCSRInternal(params)
 
@@ -774,21 +734,25 @@ class CSRCore(private val context: Context) {
         response["keystore"] = keystoreDescriptor
       }
 
-      promise.resolve(response)
-    } catch (e: CSRRejectedException) {
-      promise.reject(e.code, e.message)
+      if (result.warnings.isNotEmpty()) {
+        response["warnings"] = result.warnings
+      }
+
+      return response
+    } catch (e: CSRException) {
+      throw e
     } catch (e: Exception) {
       Log.e(MODULE_NAME, e.message, e)
-      promise.reject("CSR_GENERATION_ERROR", e.message, e)
+      throw CSRException(ErrorCode.CSR_GENERATION_ERROR, e.message, e)
     }
   }
 
   /**
    * Core CSR generation logic, separated from [generateCSR] so tests can assert on the
-   * typed result and on the exception type rather than on a reply.
+   * typed result and on the exception type rather than on the JS-facing map.
    */
   @Throws(Exception::class)
-  internal fun generateCSRInternal(params: Map<String, *>): CSRGenerationResult {
+  internal fun generateCSRInternal(params: CSRParams): CSRGenerationResult {
     var keyPair: KeyPair? = null
     var csr: PKCS10CertificationRequest? = null
     var currentStep = "initialization"
@@ -796,40 +760,40 @@ class CSRCore(private val context: Context) {
     try {
       // Extract and validate parameters
       currentStep = "parameter extraction"
-      val country = sanitizeDNValue(optString(params, "country", DEFAULT_COUNTRY))
-      val state = sanitizeDNValue(optString(params, "state", DEFAULT_STATE))
-      val locality = sanitizeDNValue(optString(params, "locality", DEFAULT_LOCALITY))
-      val organization = sanitizeDNValue(optString(params, "organization", DEFAULT_ORGANIZATION))
-      val organizationalUnit = sanitizeDNValue(optString(params, "organizationalUnit", DEFAULT_ORGANIZATIONAL_UNIT))
-      val commonName = sanitizeDNValue(optString(params, "commonName", ""))
-      val serialNumber = sanitizeDNValue(optString(params, "serialNumber", ""))
-      val ipAddress = optString(params, "ipAddress", DEFAULT_IP_ADDRESS)
-      val dnsName = optString(params, "dnsName", null)
-      val curve = optString(params, "curve", DEFAULT_ECC_CURVE)
-      val phoneInfo = optString(params, "phoneInfo", null)
-      val rawAlias = optString(params, "privateKeyAlias", null)
+      // Null means "not provided" (see CSRParams), so it takes the default.
+      val country = sanitizeDNValue(params.country ?: DEFAULT_COUNTRY)
+      val state = sanitizeDNValue(params.state ?: DEFAULT_STATE)
+      val locality = sanitizeDNValue(params.locality ?: DEFAULT_LOCALITY)
+      val organization = sanitizeDNValue(params.organization ?: DEFAULT_ORGANIZATION)
+      val organizationalUnit = sanitizeDNValue(params.organizationalUnit ?: DEFAULT_ORGANIZATIONAL_UNIT)
+      val commonName = sanitizeDNValue(params.commonName)
+      val serialNumber = sanitizeDNValue(params.serialNumber)
+      val ipAddress = params.ipAddress ?: DEFAULT_IP_ADDRESS
+      val dnsName = params.dnsName
+      val curveName = params.curve ?: DEFAULT_ECC_CURVE
+      val phoneInfo = params.phoneInfo
+      val rawAlias = params.privateKeyAlias
 
-      // Validate required parameters. The null checks are what isValidAlias/isValidCurve
-      // already reject; repeating them here is only so the compiler knows the values are set.
+      // Validate required parameters. The null check is what isValidAlias
+      // already rejects; repeating it here is only so the compiler knows the value is set.
       if (rawAlias == null || !isValidAlias(rawAlias)) {
-        throw CSRRejectedException("MISSING_ALIAS", "privateKeyAlias is required")
+        throw CSRException(ErrorCode.MISSING_ALIAS, "privateKeyAlias is required")
       }
       val privateKeyAlias = rawAlias.trimJava()
 
-      if (curve == null || !isValidCurve(curve)) {
-        throw CSRRejectedException("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1")
-      }
+      val curve = Curve.fromName(curveName)
+        ?: throw CSRException(ErrorCode.INVALID_CURVE, "Curve must be one of: ${Curve.names}")
 
       // Validate IP address
-      if (ipAddress != null && ipAddress.trimJava().isNotEmpty() && !isValidIPAddress(ipAddress)) {
-        throw CSRRejectedException("INVALID_IP", "Invalid IP address format: $ipAddress")
+      if (ipAddress.trimJava().isNotEmpty() && !isValidIPAddress(ipAddress)) {
+        throw CSRException(ErrorCode.INVALID_IP, "Invalid IP address format: $ipAddress")
       }
 
       // Keys are always allowed to be overwritten for simplicity.
       // If a key with the same alias exists, it will be replaced.
 
       // App can request hardware, but module decides based on TLS compatibility
-      val requestedHardwareKey = optBoolean(params, "useHardwareKey", false)
+      val requestedHardwareKey = params.useHardwareKey ?: false
 
       // Override app preference if hardware won't work for TLS
       val useHardwareKey = requestedHardwareKey && canUseHardwareKeysForTLS()
@@ -839,13 +803,12 @@ class CSRCore(private val context: Context) {
       }
 
       Log.d(MODULE_NAME, "Starting CSR generation - alias: " + privateKeyAlias +
-        ", curve: " + curve + ", hardware: " + useHardwareKey)
-
-      val keystoreCurve: String = curve
+        ", curve: " + curve.keystoreName + ", hardware: " + useHardwareKey)
 
       // Delete any existing key with the same alias from the OPPOSITE keystore
       // to prevent dual-store collision where getPublicKey returns stale key
       currentStep = "removing stale keys"
+      val warnings = mutableListOf<String>()
       try {
         if (useHardwareKey) {
           // About to use hardware, delete any software key with same alias
@@ -862,23 +825,23 @@ class CSRCore(private val context: Context) {
         // dual-store collision this deletion prevents. Rethrown so the promise rejects.
         throw e
       } catch (e: Exception) {
-        // Log stale key deletion failure but continue - this is a cleanup operation
-        // and shouldn't block the main operation. deleteSoftwareKeyIfExists() swallows
-        // everything except KeystoreLocationException, so this mostly catches
-        // deleteHardwareKeyIfExists() failures (e.g., transient Android Keystore
-        // unavailability). For software key generation, blocking on hardware keystore
-        // failures is overly strict.
+        // Any other failure (e.g. transient Android Keystore unavailability) does not block
+        // generation: the store that failed is not the one the new key goes into, and rejecting
+        // would leave the device unable to enrol at all. But a stale key may survive under this
+        // alias, so the result says so and the caller can deleteKey() and retry.
         Log.w(MODULE_NAME, "Failed to delete stale key from opposite keystore (continuing): " +
           e.message + ". May cause dual-store collision if key exists.", e)
-        // Continue with key generation instead of rejecting
+        warnings.add(
+          STALE_KEY_CLEANUP_FAILED + ": could not remove a key under this alias from the " +
+            (if (useHardwareKey) "software" else "hardware") + " keystore: " + e.message)
       }
 
       // Generate key pair
       currentStep = "key generation"
       val generated = if (useHardwareKey) {
-        generateHardwareKeyPair(privateKeyAlias, keystoreCurve)
+        generateHardwareKeyPair(privateKeyAlias, curve)
       } else {
-        generateSoftwareKeyPair(privateKeyAlias, keystoreCurve)
+        generateSoftwareKeyPair(privateKeyAlias, curve)
       }
       keyPair = generated ?: throw Exception("Key pair generation returned null")
 
@@ -887,7 +850,7 @@ class CSRCore(private val context: Context) {
       val publicKey = keyPair.public
 
       Log.d(MODULE_NAME, "Key pair generated: " + privateKeyAlias +
-        " (" + (if (useHardwareKey) "hardware" else "software") + ", " + keystoreCurve + ")")
+        " (" + (if (useHardwareKey) "hardware" else "software") + ", " + curve.keystoreName + ")")
 
       // Build subject DN using X500NameBuilder (handles escaping)
       val subjectBuilder = X500NameBuilder(BCStyle.INSTANCE)
@@ -939,7 +902,7 @@ class CSRCore(private val context: Context) {
       csrBuilder.addAttribute(PKCSObjectIdentifiers.pkcs_9_at_extensionRequest, extGen.generate())
 
       currentStep = "CSR signing"
-      val signatureAlgorithm = signatureAlgorithmFor(keystoreCurve)
+      val signatureAlgorithm = curve.signatureAlgorithm
       val signer: ContentSigner = if (useHardwareKey) {
         AndroidKeystoreContentSigner(privateKey, signatureAlgorithm)
       } else {
@@ -968,8 +931,9 @@ class CSRCore(private val context: Context) {
         hardwareKeyRequested = requestedHardwareKey,
         tlsCompatible = canUseHardwareKeysForTLS(),
         keystorePath = keystorePath,
+        warnings = warnings,
       )
-    } catch (e: CSRRejectedException) {
+    } catch (e: CSRException) {
       throw e
     } catch (e: KeystoreLocationException) {
       // Keep the type. Storage failed, not key generation, and the rewrap below would flatten
@@ -989,7 +953,7 @@ class CSRCore(private val context: Context) {
   }
 
   @Throws(Exception::class)
-  private fun generateHardwareKeyPair(privateKeyAlias: String, keystoreCurve: String): KeyPair? {
+  private fun generateHardwareKeyPair(privateKeyAlias: String, curve: Curve): KeyPair? {
     Log.d(MODULE_NAME, "Generating hardware-backed key pair")
 
     var hasStrongBox = false
@@ -1005,11 +969,11 @@ class CSRCore(private val context: Context) {
 
     // Decide whether to use StrongBox or TEE
     if (hasStrongBox) {
-      if (keystoreCurve == "secp256r1") {
+      if (curve == Curve.P256) {
         useStrongBox = true
         Log.d(MODULE_NAME, "Using StrongBox-backed key generation (P-256)")
       } else {
-        Log.w(MODULE_NAME, "StrongBox only supports P-256. Requested curve: $keystoreCurve. Using TEE instead.")
+        Log.w(MODULE_NAME, "StrongBox only supports P-256. Requested curve: ${curve.keystoreName}. Using TEE instead.")
       }
     } else {
       Log.d(MODULE_NAME, "Using hardware-backed (TEE) key generation")
@@ -1017,7 +981,6 @@ class CSRCore(private val context: Context) {
 
     val keyPairGenerator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE)
 
-    // Add clarifying comment about purpose flags
     // Note: canUseHardwareKeysForTLS() guarantees Android 12+, but we check again
     // for defense-in-depth in case this method is called directly
     var purposes = KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
@@ -1026,7 +989,7 @@ class CSRCore(private val context: Context) {
     }
 
     val specBuilder = KeyGenParameterSpec.Builder(privateKeyAlias, purposes)
-      .setAlgorithmParameterSpec(ECGenParameterSpec(keystoreCurve))
+      .setAlgorithmParameterSpec(ECGenParameterSpec(curve.keystoreName))
       .setDigests(
         KeyProperties.DIGEST_SHA256,
         KeyProperties.DIGEST_SHA384,
@@ -1064,12 +1027,12 @@ class CSRCore(private val context: Context) {
     } catch (e: Exception) {
       Log.e(MODULE_NAME, "Hardware key generation failed: " + e.message)
       throw Exception("Hardware key generation failed. Device may not support hardware-backed keys for curve " +
-        keystoreCurve + ". Error: " + e.message, e)
+        curve.keystoreName + ". Error: " + e.message, e)
     }
   }
 
   @Throws(Exception::class)
-  private fun generateSoftwareKeyPair(privateKeyAlias: String, keystoreCurve: String): KeyPair? {
+  private fun generateSoftwareKeyPair(privateKeyAlias: String, curve: Curve): KeyPair? {
     Log.d(MODULE_NAME, "Generating software key pair")
 
     ensureBouncyCastleProvider()
@@ -1100,7 +1063,7 @@ class CSRCore(private val context: Context) {
       throw Exception("BouncyCastle provider does not support EC algorithm. Provider may be corrupted or stripped by ProGuard/R8.", e)
     }
 
-    val ecSpec = ECGenParameterSpec(keystoreCurve)
+    val ecSpec = ECGenParameterSpec(curve.keystoreName)
     keyPairGenerator.initialize(ecSpec, SecureRandom())
     val keyPair = keyPairGenerator.generateKeyPair()
     Log.d(MODULE_NAME, "Software key pair generated successfully")
@@ -1109,18 +1072,18 @@ class CSRCore(private val context: Context) {
     // Prevents race conditions when multiple threads call generateCSR simultaneously
     // All read-modify-write operations on the PKCS12 file must be atomic to prevent corruption
     synchronized(SOFTWARE_KEYSTORE_LOCK) {
-      storeSoftwareKey(privateKeyAlias, keyPair, keystoreCurve)
+      storeSoftwareKey(privateKeyAlias, keyPair, curve)
     }
 
     return keyPair
   }
 
   @Throws(Exception::class)
-  private fun storeSoftwareKey(privateKeyAlias: String, keyPair: KeyPair, keystoreCurve: String) {
+  private fun storeSoftwareKey(privateKeyAlias: String, keyPair: KeyPair, curve: Curve) {
     val softwareKeyStore = loadSoftwareKeyStore()
 
     val tempSubject = "CN=Temp-$privateKeyAlias"
-    val selfSignedCert = createSelfSignedCertificate(keyPair, tempSubject, keystoreCurve)
+    val selfSignedCert = createSelfSignedCertificate(keyPair, tempSubject, curve)
 
     softwareKeyStore.setKeyEntry(
       privateKeyAlias,
@@ -1132,7 +1095,7 @@ class CSRCore(private val context: Context) {
     saveSoftwareKeyStore(softwareKeyStore)
   }
 
-  fun deleteKey(privateKeyAlias: String?, promise: Reply) {
+  fun deleteKey(privateKeyAlias: String): Boolean {
     try {
       var deleted = false
 
@@ -1176,14 +1139,14 @@ class CSRCore(private val context: Context) {
         }
       }
 
-      promise.resolve(deleted)
+      return deleted
     } catch (e: Exception) {
       Log.e(MODULE_NAME, "Failed to delete key", e)
-      promise.reject("DELETE_KEY_ERROR", "Failed to delete key: " + e.message, e)
+      throw CSRException(ErrorCode.DELETE_KEY_ERROR, "Failed to delete key: " + e.message, e)
     }
   }
 
-  fun getHardwareKeystoreCapabilities(promise: Reply) {
+  fun getHardwareKeystoreCapabilities(): Map<String, Any?> {
     try {
       val result = getHardwareKeystoreCapabilitiesInternal()
 
@@ -1195,9 +1158,9 @@ class CSRCore(private val context: Context) {
       capabilities["model"] = result.model
       capabilities["device"] = result.device
 
-      promise.resolve(capabilities)
+      return capabilities
     } catch (e: Exception) {
-      promise.reject("CAPABILITY_CHECK_ERROR", "Failed to check capabilities: " + e.message, e)
+      throw CSRException(ErrorCode.CAPABILITY_CHECK_ERROR, "Failed to check capabilities: " + e.message, e)
     }
   }
 
@@ -1218,15 +1181,14 @@ class CSRCore(private val context: Context) {
     )
   }
 
-  fun keyExists(privateKeyAlias: String?, promise: Reply) {
+  fun keyExists(privateKeyAlias: String): Boolean {
     try {
       // Check hardware keystore
       try {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
         keyStore.load(null)
         if (keyStore.containsAlias(privateKeyAlias)) {
-          promise.resolve(true)
-          return
+          return true
         }
       } catch (e: Exception) {
         // Continue to software keystore
@@ -1234,23 +1196,23 @@ class CSRCore(private val context: Context) {
 
       // Synchronize software keystore access
       synchronized(SOFTWARE_KEYSTORE_LOCK) {
-        try {
+        return try {
           val softwareKeyStore = loadSoftwareKeyStore()
-          promise.resolve(softwareKeyStore.containsAlias(privateKeyAlias))
+          softwareKeyStore.containsAlias(privateKeyAlias)
         } catch (e: KeystoreLocationException) {
           throw e // "storage is broken" must not be reported as "key does not exist"
         } catch (e: Exception) {
           // loadSoftwareKeyStore() handles corruption internally; unexpected errors return false
           Log.w(MODULE_NAME, "Error checking software keystore: " + e.message)
-          promise.resolve(false)
+          false
         }
       }
     } catch (e: Exception) {
-      promise.reject("KEY_EXISTS_ERROR", "Failed to check key existence: " + e.message, e)
+      throw CSRException(ErrorCode.KEY_EXISTS_ERROR, "Failed to check key existence: " + e.message, e)
     }
   }
 
-  fun getPublicKey(privateKeyAlias: String?, promise: Reply) {
+  fun getPublicKey(privateKeyAlias: String): String {
     try {
       // Try hardware keystore first
       try {
@@ -1261,8 +1223,7 @@ class CSRCore(private val context: Context) {
           val entry = keyStore.getEntry(privateKeyAlias, null)
           if (entry is KeyStore.PrivateKeyEntry) {
             val publicKey = entry.certificate.publicKey
-            promise.resolve(Base64.encodeToString(publicKey.encoded, Base64.NO_WRAP))
-            return
+            return Base64.encodeToString(publicKey.encoded, Base64.NO_WRAP)
           }
         }
       } catch (e: Exception) {
@@ -1281,8 +1242,7 @@ class CSRCore(private val context: Context) {
             )
             if (entry is KeyStore.PrivateKeyEntry) {
               val publicKey = entry.certificate.publicKey
-              promise.resolve(Base64.encodeToString(publicKey.encoded, Base64.NO_WRAP))
-              return
+              return Base64.encodeToString(publicKey.encoded, Base64.NO_WRAP)
             }
           }
         } catch (e: KeystoreLocationException) {
@@ -1292,14 +1252,16 @@ class CSRCore(private val context: Context) {
           // is present but unreadable (e.g. UnrecoverableEntryException). KEY_NOT_FOUND would invite
           // the app to re-enrol over a key that still exists, so report it as a retrieval failure.
           Log.w(MODULE_NAME, "Error retrieving key from software keystore: " + e.message)
-          promise.reject("GET_PUBLIC_KEY_ERROR", "Failed to read key with alias '$privateKeyAlias': " + e.message, e)
-          return
+          throw CSRException(
+            ErrorCode.GET_PUBLIC_KEY_ERROR, "Failed to read key with alias '$privateKeyAlias': " + e.message, e)
         }
       }
 
-      promise.reject("KEY_NOT_FOUND", "Key with alias '$privateKeyAlias' not found")
+      throw CSRException(ErrorCode.KEY_NOT_FOUND, "Key with alias '$privateKeyAlias' not found")
+    } catch (e: CSRException) {
+      throw e
     } catch (e: Exception) {
-      promise.reject("GET_PUBLIC_KEY_ERROR", "Failed to get public key: " + e.message, e)
+      throw CSRException(ErrorCode.GET_PUBLIC_KEY_ERROR, "Failed to get public key: " + e.message, e)
     }
   }
 
@@ -1335,27 +1297,17 @@ class CSRCore(private val context: Context) {
     }
   }
 
-  // Helper method to delete software key if it exists
+  // Helper method to delete software key if it exists. Failures propagate: generateCSRInternal
+  // decides whether they are fatal (KeystoreLocationException) or a warning (anything else).
   @Throws(Exception::class)
   private fun deleteSoftwareKeyIfExists(privateKeyAlias: String) {
     synchronized(SOFTWARE_KEYSTORE_LOCK) {
-      try {
-        val softwareKeyStore = loadSoftwareKeyStore()
+      val softwareKeyStore = loadSoftwareKeyStore()
 
-        if (softwareKeyStore.containsAlias(privateKeyAlias)) {
-          softwareKeyStore.deleteEntry(privateKeyAlias)
-          saveSoftwareKeyStore(softwareKeyStore)
-          Log.d(MODULE_NAME, "Deleted stale software key: $privateKeyAlias")
-        }
-      } catch (e: KeystoreLocationException) {
-        // Same reason the three keystore-reading entry points rethrow: "storage is broken" must
-        // not look like "no stale key here". This method exists to stop a stale software key
-        // from colliding with a new hardware key under the same alias, and it cannot know
-        // whether one is there if it never reached the keystore.
-        throw e
-      } catch (e: Exception) {
-        // loadSoftwareKeyStore() handles corruption internally; log unexpected errors
-        Log.w(MODULE_NAME, "Error deleting stale software key: " + e.message)
+      if (softwareKeyStore.containsAlias(privateKeyAlias)) {
+        softwareKeyStore.deleteEntry(privateKeyAlias)
+        saveSoftwareKeyStore(softwareKeyStore)
+        Log.d(MODULE_NAME, "Deleted stale software key: $privateKeyAlias")
       }
     }
   }
@@ -1502,6 +1454,9 @@ class CSRCore(private val context: Context) {
     private const val DEFAULT_IP_ADDRESS = "10.10.10.10"
     private const val DEFAULT_ECC_CURVE = "secp384r1"
 
+    /** Prefix of the `warnings` entry for a stale opposite-keystore key that may have survived. */
+    internal const val STALE_KEY_CLEANUP_FAILED = "STALE_KEY_CLEANUP_FAILED"
+
     // Keep a direct reference to our full BouncyCastle provider instance
     // to avoid getting the system's stripped-down BC provider
     private val FULL_BC_PROVIDER: Provider = BouncyCastleProvider()
@@ -1575,22 +1530,6 @@ class CSRCore(private val context: Context) {
           Log.i(MODULE_NAME, "BouncyCastle provider registered (v" + FULL_BC_PROVIDER.version + ")")
         }
       }
-    }
-
-    /**
-     * Reads an optional string param. A key that is present keeps its value even when that value is
-     * null, and a non-string value throws ClassCastException - both match what ReadableMap's
-     * `hasKey ? getString : default` did before the Expo migration, so malformed input still
-     * fails in the same step with the same code. JS `undefined` values are stripped in
-     * src/index.ts before they get here, as the old bridge did, so they still read as absent.
-     */
-    private fun optString(params: Map<String, *>, key: String, fallback: String?): String? {
-      return if (params.containsKey(key)) params[key] as String? else fallback
-    }
-
-    /** Boolean counterpart of [optString]; a present null throws, as getBoolean did. */
-    private fun optBoolean(params: Map<String, *>, key: String, fallback: Boolean): Boolean {
-      return if (params.containsKey(key)) params[key] as Boolean else fallback
     }
 
     /** Timestamp for a quarantine filename; see [CORRUPTED_INFIX] for the format contract. */

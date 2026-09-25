@@ -1,28 +1,12 @@
 import CryptoKit
+import ExpoModulesCore
 import Foundation
 import Security
 
-/// A rejection that reaches JS as `error.code` / `error.message`.
+/// ECC key pair and CSR generation.
 ///
-/// The codes are part of the JS contract (callers match on `error.code`), so treat them as API.
-struct CSRError: Error {
-  let code: String
-  let message: String
-
-  init(_ code: String, _ message: String) {
-    self.code = code
-    self.message = message
-  }
-
-  init(_ code: String, _ error: Error) {
-    self.init(code, error.localizedDescription)
-  }
-}
-
-/// ECC key pair and CSR generation, with no dependency on React Native or Expo.
-///
-/// The JS-facing module is the Expo module in CSRModule.swift, which only adapts arguments and
-/// promises. Everything that decides behaviour - validation, key storage, error codes, response
+/// The JS-facing module is the Expo module in CSRModule.swift, which only moves calls onto its
+/// queue. Everything that decides behaviour - validation, key storage, error codes, response
 /// shape - lives here. Every entry point either returns the value to resolve with or throws a
 /// `CSRError`.
 final class CSRCore {
@@ -35,53 +19,52 @@ final class CSRCore {
   private static let defaultIPAddress = "10.10.10.10"
   private static let defaultECCCurve = "secp384r1"
 
-  func generateCSR(_ params: [String: Any]) throws -> [String: Any] {
-    // Everything is read up front so that a malformed value is rejected before a key is stored.
-    let commonName = try Self.string(params, "commonName") ?? ""
-    let serialNumber = try Self.string(params, "serialNumber") ?? ""
-    let country = try Self.string(params, "country") ?? Self.defaultCountry
-    let state = try Self.string(params, "state") ?? Self.defaultState
-    let locality = try Self.string(params, "locality") ?? Self.defaultLocality
-    let organization = try Self.string(params, "organization") ?? Self.defaultOrganization
-    let organizationalUnit = try Self.string(params, "organizationalUnit") ?? Self.defaultOrganizationalUnit
-    let ipAddress = try Self.string(params, "ipAddress") ?? Self.defaultIPAddress
-    let dnsName = try Self.string(params, "dnsName")
-    let curveName = try Self.string(params, "curve") ?? Self.defaultECCCurve
-    let phoneInfo = try Self.string(params, "phoneInfo")
-    let privateKeyAlias = try Self.string(params, "privateKeyAlias")
+  func generateCSR(_ params: CSRParams) throws -> CSRResult {
+    let commonName = params.commonName ?? ""
+    let serialNumber = params.serialNumber ?? ""
+    let country = params.country ?? Self.defaultCountry
+    let state = params.state ?? Self.defaultState
+    let locality = params.locality ?? Self.defaultLocality
+    let organization = params.organization ?? Self.defaultOrganization
+    let organizationalUnit = params.organizationalUnit ?? Self.defaultOrganizationalUnit
+    let ipAddress = params.ipAddress ?? Self.defaultIPAddress
+    let dnsName = params.dnsName
+    let curveName = params.curve ?? Self.defaultECCCurve
+    let phoneInfo = params.phoneInfo
+    let privateKeyAlias = params.privateKeyAlias
 
     // Default: false (software keys - matches Android behavior)
     // For P-256: can be set to true to try Secure Enclave
     // For P-384/P-521: always false (Secure Enclave doesn't support them)
-    let useHardwareKey = try Self.bool(params, "useHardwareKey") ?? false
+    let useHardwareKey = params.useHardwareKey ?? false
 
     if commonName.isEmpty {
-      throw CSRError("INVALID_PARAM", "commonName is required")
+      throw CSRError(.invalidParam, "commonName is required")
     }
 
     guard let privateKeyAlias, !privateKeyAlias.isEmpty else {
-      throw CSRError("INVALID_PARAM", "privateKeyAlias is required")
+      throw CSRError(.invalidParam, "privateKeyAlias is required")
     }
 
     let curve = try Curve(name: curveName)
 
     let trimmedIPAddress = ipAddress.trimmingCharacters(in: .whitespacesAndNewlines)
     if !trimmedIPAddress.isEmpty && Self.ipAddressBytes(trimmedIPAddress) == nil {
-      throw CSRError("INVALID_IP", "Invalid IP address format: \(ipAddress)")
+      throw CSRError(.invalidIP, "Invalid IP address format: \(ipAddress)")
     }
 
     let keyPair: KeyPair
     do {
       keyPair = try generateKeyPair(curve: curve, alias: privateKeyAlias, useHardwareKey: useHardwareKey)
     } catch {
-      throw CSRError("KEY_GENERATION_ERROR", error)
+      throw CSRError(.keyGenerationError, error)
     }
 
     let publicKeyData: Data
     do {
       publicKeyData = try exportPublicKey(keyPair.publicKey)
     } catch {
-      throw CSRError("PUBLIC_KEY_ERROR", error)
+      throw CSRError(.publicKeyError, error)
     }
 
     let csrData: Data
@@ -103,18 +86,18 @@ final class CSRCore {
         phoneInfo: phoneInfo
       )
     } catch {
-      throw CSRError("CSR_GENERATION_ERROR", error)
+      throw CSRError(.csrGenerationError, error)
     }
 
-    return [
-      "csr": Self.convertToPEM(csrData, label: "CERTIFICATE REQUEST"),
-      "privateKeyAlias": privateKeyAlias,
-      "publicKey": Self.convertToPEM(publicKeyData, label: "PUBLIC KEY"),
-      "isHardwareBacked": keyPair.isHardwareBacked,
-      "useHardwareKey": keyPair.isHardwareBacked,
-      "hardwareKeyRequested": useHardwareKey,
-      "tlsCompatible": true,  // iOS Secure Enclave always supports TLS
-    ]
+    var result = CSRResult()
+    result.csr = Self.convertToPEM(csrData, label: "CERTIFICATE REQUEST")
+    result.privateKeyAlias = privateKeyAlias
+    result.publicKey = Self.convertToPEM(publicKeyData, label: "PUBLIC KEY")
+    result.isHardwareBacked = keyPair.isHardwareBacked
+    result.useHardwareKey = keyPair.isHardwareBacked
+    result.hardwareKeyRequested = useHardwareKey
+    result.tlsCompatible = true  // iOS Secure Enclave always supports TLS
+    return result
   }
 
   /// Resolves true when the key is gone afterwards, including when it never existed. Keychain
@@ -124,23 +107,38 @@ final class CSRCore {
     return status == errSecSuccess || status == errSecItemNotFound
   }
 
-  func keyExists(_ privateKeyAlias: String) -> Bool {
+  /// Only errSecItemNotFound means "no key". Any other failure (e.g. errSecInteractionNotAllowed
+  /// while the device is locked) rejects with KEY_EXISTS_ERROR, so a caller cannot mistake an
+  /// unreadable Keychain for a missing key and regenerate over one that is still enrolled.
+  func keyExists(_ privateKeyAlias: String) throws -> Bool {
     var query = Self.keyQuery(privateKeyAlias)
     query[kSecReturnRef as String] = true
 
-    return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    let status = SecItemCopyMatching(query as CFDictionary, nil)
+    switch status {
+    case errSecSuccess:
+      return true
+    case errSecItemNotFound:
+      return false
+    default:
+      throw CSRError(.keyExistsError, Self.error(code: Int(status), "Keychain lookup failed"))
+    }
   }
 
   func getPublicKey(_ privateKeyAlias: String) throws -> String {
+    var query = Self.keyQuery(privateKeyAlias)
+    query[kSecReturnRef as String] = true
+
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+    if status == errSecItemNotFound {
+      throw CSRError(.keyNotFound, "No key found for alias: \(privateKeyAlias)")
+    }
+
     do {
-      var query = Self.keyQuery(privateKeyAlias)
-      query[kSecReturnRef as String] = true
-
-      var result: CFTypeRef?
-      let status = SecItemCopyMatching(query as CFDictionary, &result)
-
       guard status == errSecSuccess, let item = result, CFGetTypeID(item) == SecKeyGetTypeID() else {
-        throw Self.error(code: Int(status), "Key not found")
+        throw Self.error(code: Int(status), "Keychain lookup failed")
       }
 
       // The type ID check above is what makes this cast safe.
@@ -150,11 +148,11 @@ final class CSRCore {
 
       return Self.convertToPEM(try exportPublicKey(publicKey), label: "PUBLIC KEY")
     } catch {
-      throw CSRError("GET_PUBLIC_KEY_ERROR", error)
+      throw CSRError(.getPublicKeyError, error)
     }
   }
 
-  func getHardwareKeystoreCapabilities() -> [String: Any] {
+  func getHardwareKeystoreCapabilities() -> HardwareKeystoreCapabilities {
     // iOS Secure Enclave is always TLS-compatible (no SDK version gating like Android)
     // However, only P-256 is supported; P-384/P-521 fall back to software
     //
@@ -162,47 +160,17 @@ final class CSRCore {
     // module's minimum iOS version has one (A7 and later), so report it as available.
     let model = Self.deviceModel()
 
-    return [
-      "tlsCompatible": true,  // iOS Secure Enclave always TLS-compatible
-      "androidSdkVersion": 0,  // N/A for iOS
-      "hasStrongBox": true,  // Secure Enclave is iOS equivalent
-      "manufacturer": "Apple",
-      "model": model,
-      "device": model,
-    ]
+    var capabilities = HardwareKeystoreCapabilities()
+    capabilities.tlsCompatible = true  // iOS Secure Enclave always TLS-compatible
+    capabilities.androidSdkVersion = 0  // N/A for iOS
+    capabilities.hasStrongBox = true  // Secure Enclave is iOS equivalent
+    capabilities.manufacturer = "Apple"
+    capabilities.model = model
+    capabilities.device = model
+    return capabilities
   }
 
   // MARK: - Helper Methods
-
-  /// Reads an optional string parameter. Absent and null both mean "not provided". Any other type
-  /// is rejected with EXCEPTION - the code the Objective-C implementation produced when it sent a
-  /// string message to a non-string value.
-  private static func string(_ params: [String: Any], _ key: String) throws -> String? {
-    switch params[key] {
-    case nil, is NSNull:
-      return nil
-    case let value as String:
-      return value
-    default:
-      throw CSRError("EXCEPTION", "\(key) must be a string")
-    }
-  }
-
-  /// Reads an optional boolean parameter, accepting what `-[NSObject boolValue]` accepted.
-  private static func bool(_ params: [String: Any], _ key: String) throws -> Bool? {
-    switch params[key] {
-    case nil, is NSNull:
-      return nil
-    case let value as Bool:
-      return value
-    case let value as NSNumber:
-      return value.boolValue
-    case let value as String:
-      return (value as NSString).boolValue
-    default:
-      throw CSRError("EXCEPTION", "\(key) must be a boolean")
-    }
-  }
 
   private static func error(code: Int, _ description: String) -> NSError {
     NSError(domain: "CSRModule", code: code, userInfo: [NSLocalizedDescriptionKey: description])
@@ -308,13 +276,16 @@ final class CSRCore {
       throw Self.takeError(cfError, "Public key export failed")
     }
 
-    return Self.wrapPublicKeyInSPKI(keyData, curve: Self.curve(of: publicKey))
+    return Self.wrapPublicKeyInSPKI(keyData, curve: try Self.curve(of: publicKey))
   }
 
-  private static func curve(of key: SecKey) -> Curve {
+  private static func curve(of key: SecKey) throws -> Curve {
     let attributes = SecKeyCopyAttributes(key) as? [String: Any]
     let keySize = (attributes?[kSecAttrKeySizeInBits as String] as? NSNumber)?.intValue
-    return Curve(keySize: keySize)
+    guard let keySize, let curve = Curve(keySize: keySize) else {
+      throw error(code: -1, "Unsupported EC key size: \(keySize.map(String.init) ?? "unknown")")
+    }
+    return curve
   }
 
   private static func takeError(_ cfError: Unmanaged<CFError>?, _ fallback: String) -> Error {
@@ -339,7 +310,7 @@ final class CSRCore {
 
     let certRequestInfo = DER.sequence(DER.integer(0) + subjectDN + publicKeyInfo + attributes)
 
-    let curve = Self.curve(of: publicKey)
+    let curve = try Self.curve(of: publicKey)
     let signature = try Self.sign(certRequestInfo, with: privateKey, curve: curve)
 
     return DER.sequence(certRequestInfo + Self.encodeSignatureAlgorithm(curve) + DER.bitString(signature))
@@ -519,26 +490,24 @@ final class CSRCore {
 
 // MARK: - Curves
 
-private enum Curve {
-  case p256, p384, p521
+private enum Curve: String, CaseIterable {
+  case p256 = "secp256r1"
+  case p384 = "secp384r1"
+  case p521 = "secp521r1"
 
   /// Unrecognised names are rejected, matching Android's `INVALID_CURVE`.
   init(name: String) throws {
-    switch name {
-    case "secp256r1": self = .p256
-    case "secp384r1": self = .p384
-    case "secp521r1": self = .p521
-    default:
-      throw CSRError("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1")
+    guard let curve = Curve(rawValue: name) else {
+      let names = Self.allCases.map(\.rawValue).joined(separator: ", ")
+      throw CSRError(.invalidCurve, "Curve must be one of: \(names)")
     }
+    self = curve
   }
 
-  init(keySize: Int?) {
-    switch keySize {
-    case 256: self = .p256
-    case 521: self = .p521
-    default: self = .p384
-    }
+  /// Nil for a size none of the supported curves has, so the caller decides how to fail.
+  init?(keySize: Int) {
+    guard let curve = Self.allCases.first(where: { $0.keySize == keySize }) else { return nil }
+    self = curve
   }
 
   var keySize: Int {

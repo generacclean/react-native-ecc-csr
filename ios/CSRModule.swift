@@ -3,8 +3,9 @@ import ExpoModulesCore
 /**
  Expo module exposing `CSRCore` to JS as `CSRModule`.
 
- Deliberately thin: it adapts arguments and promises and nothing else, so that all behaviour -
- including every rejection code - stays in `CSRCore`.
+ Deliberately thin: it moves each call onto the module's queue and nothing else, so that all
+ behaviour - including every rejection code - stays in `CSRCore`. Expo settles the promise from
+ the return value, or from the thrown `CSRError`'s code.
  */
 public class CSRModule: Module {
   private let core = CSRCore()
@@ -17,37 +18,24 @@ public class CSRModule: Module {
   public func definition() -> ModuleDefinition {
     Name("CSRModule")
 
-    AsyncFunction("generateCSR") { (params: [String: Any], promise: Promise) in
-      Self.settle(promise) { try self.core.generateCSR(params) }
+    AsyncFunction("generateCSR") { (params: CSRParams) in
+      try self.core.generateCSR(params)
     }.runOnQueue(queue)
 
-    AsyncFunction("getHardwareKeystoreCapabilities") { (promise: Promise) in
-      Self.settle(promise) { self.core.getHardwareKeystoreCapabilities() }
+    AsyncFunction("getHardwareKeystoreCapabilities") {
+      self.core.getHardwareKeystoreCapabilities()
     }.runOnQueue(queue)
 
-    AsyncFunction("deleteKey") { (privateKeyAlias: String, promise: Promise) in
-      Self.settle(promise) { self.core.deleteKey(privateKeyAlias) }
+    AsyncFunction("deleteKey") { (privateKeyAlias: String) in
+      self.core.deleteKey(privateKeyAlias)
     }.runOnQueue(queue)
 
-    AsyncFunction("keyExists") { (privateKeyAlias: String, promise: Promise) in
-      Self.settle(promise) { self.core.keyExists(privateKeyAlias) }
+    AsyncFunction("keyExists") { (privateKeyAlias: String) in
+      try self.core.keyExists(privateKeyAlias)
     }.runOnQueue(queue)
 
-    AsyncFunction("getPublicKey") { (privateKeyAlias: String, promise: Promise) in
-      Self.settle(promise) { try self.core.getPublicKey(privateKeyAlias) }
+    AsyncFunction("getPublicKey") { (privateKeyAlias: String) in
+      try self.core.getPublicKey(privateKeyAlias)
     }.runOnQueue(queue)
-  }
-
-  /// Rejects through `promise.reject(code, message)` rather than by throwing from the closure:
-  /// Expo only keeps the code of errors that are Expo `Exception`s, and `CSRError` is not one.
-  private static func settle(_ promise: Promise, _ body: () throws -> Any) {
-    do {
-      promise.resolve(try body())
-    } catch let error as CSRError {
-      promise.reject(error.code, error.message)
-    } catch {
-      // CSRCore only throws CSRError; this keeps the promise from never settling if that changes.
-      promise.reject("NATIVE_ERROR", error.localizedDescription)
-    }
   }
 }

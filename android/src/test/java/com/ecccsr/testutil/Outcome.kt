@@ -1,6 +1,6 @@
 package com.ecccsr.testutil
 
-import com.ecccsr.CSRCore
+import com.ecccsr.CSRException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
 
@@ -26,21 +26,11 @@ sealed interface Outcome {
 }
 
 /**
- * Runs a CSRCore call and returns how it settled. Every test goes through this, so a change to
- * how CSRCore reports results only has to be reflected here.
+ * Runs a CSRCore call and returns how it settled: resolved with its return value, or rejected
+ * with the code of the CSRException it threw - the same mapping Expo applies to the promise.
  */
-fun settle(call: (CSRCore.Reply) -> Unit): Outcome {
-  var outcome: Outcome? = null
-  call(object : CSRCore.Reply {
-    override fun resolve(value: Any?) {
-      check(outcome == null) { "Settled twice" }
-      outcome = Outcome.Resolved(value)
-    }
-
-    override fun reject(code: String, message: String?, cause: Throwable?) {
-      check(outcome == null) { "Settled twice" }
-      outcome = Outcome.Rejected(code, message, cause)
-    }
-  })
-  return outcome ?: fail("CSRCore call returned without settling") as Nothing
+fun settle(call: () -> Any?): Outcome = try {
+  Outcome.Resolved(call())
+} catch (e: CSRException) {
+  Outcome.Rejected(e.code, e.message, e.cause)
 }

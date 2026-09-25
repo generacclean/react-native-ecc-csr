@@ -47,6 +47,13 @@ export interface CSRResult {
    * absent — keys are stored in the Keychain, not a file, regardless of useHardwareKey.
    */
   keystore?: CSRKeystoreDescriptor;
+  /**
+   * Android only. Non-fatal problems hit while generating the CSR; absent when there were none.
+   * Today the only one starts with `STALE_KEY_CLEANUP_FAILED`: a key left under this alias by an
+   * earlier call could not be removed from the other keystore. The new key and CSR are valid, but
+   * the stale key is still on the device - call `deleteKey` to retry removing it.
+   */
+  warnings?: string[];
 }
 
 export interface HardwareKeystoreCapabilities {
@@ -104,22 +111,8 @@ export interface CSRModuleInterface {
 // failing later at the first call as NativeModules did.
 const NativeCSRModule = requireNativeModule<CSRModuleInterface>('CSRModule');
 
-// The old bridge dropped undefined properties, so native saw the key as absent and applied its
-// default. Expo passes them through as null, which Android treats as a present value - an
-// undefined `curve` would be rejected and undefined DN fields would go into the CSR empty.
-// Stripping them here keeps the old semantics; an explicit null is still passed through.
-// Non-object params are handed to native unchanged, so they reject there rather than throw here.
-function withoutUndefined(params: CSRParams): CSRParams {
-  if (params === null || typeof params !== 'object') {
-    return params;
-  }
-  return Object.fromEntries(
-    Object.entries(params).filter(([, value]) => value !== undefined)
-  ) as unknown as CSRParams;
-}
-
 const CSRModule: CSRModuleInterface = {
-  generateCSR: (params) => NativeCSRModule.generateCSR(withoutUndefined(params)),
+  generateCSR: (params) => NativeCSRModule.generateCSR(params),
   getHardwareKeystoreCapabilities: () => NativeCSRModule.getHardwareKeystoreCapabilities(),
   deleteKey: (privateKeyAlias) => NativeCSRModule.deleteKey(privateKeyAlias),
   keyExists: (privateKeyAlias) => NativeCSRModule.keyExists(privateKeyAlias),
