@@ -100,11 +100,16 @@ These do not affect callers that pass a string alias and handle the existing cod
 - **Wrong-typed params are rejected by Expo** before the library runs, with Expo's own code
   (`ERR_*`, e.g. a number passed as `commonName`). The iOS `EXCEPTION` code is gone, and Android no
   longer rejects these with `CSR_GENERATION_ERROR`.
-- **iOS `keyExists` rejects with `KEY_EXISTS_ERROR`** when the Keychain lookup fails for any
-  reason other than "no such item" (for example `errSecInteractionNotAllowed` while the device is
-  locked). 1.x resolved `false`, which a caller could not tell apart from a missing key. **Treat
-  `KEY_EXISTS_ERROR` as "unknown" and retry later - do not re-enrol on it**, or an unreadable
-  Keychain would replace a key that is still enrolled. Android already rejected with this code.
+- **`keyExists` rejects with `KEY_EXISTS_ERROR` when a key store cannot be read**, on both
+  platforms. On iOS that is any Keychain status other than "no such item" (for example
+  `errSecInteractionNotAllowed` while the device is locked); the message includes the `OSStatus`.
+  On Android it is an `AndroidKeyStore` or software keystore that fails to load. 1.x resolved
+  `false` in these cases (Android only rejected when no-backup storage was unavailable), which a
+  caller could not tell apart from a missing key. **Treat `KEY_EXISTS_ERROR` as "unknown" and
+  retry later - do not re-enrol on it**, or an unreadable store would replace a key that is still
+  enrolled.
+- **Android `getPublicKey` rejects with `GET_PUBLIC_KEY_ERROR` when `AndroidKeyStore` cannot be
+  read**, instead of falling through to the software keystore and answering `KEY_NOT_FOUND`.
 - **iOS `getPublicKey` rejects a missing key with `KEY_NOT_FOUND`** instead of
   `GET_PUBLIC_KEY_ERROR`, matching Android. `GET_PUBLIC_KEY_ERROR` now means the key exists but
   could not be read.
@@ -166,7 +171,7 @@ Breaking Changes §6) still gets the default on both platforms.
 
 ## 🧪 Testing
 
-75 JVM unit tests (Robolectric, now in Kotlin), no emulator required. The suite now calls `CSRCore`
+77 JVM unit tests (Robolectric, now in Kotlin), no emulator required. The suite now calls `CSRCore`
 directly (`CSRModuleTest` → `CSRCoreTest`). iOS gains 15 XCTests (`ios/Tests/`) covering validation,
 the signature digest per curve and the Keychain lifecycle, run on a simulator inside an app host.
 CI runs both suites through the example app in `example/`, which also builds both platforms (so the

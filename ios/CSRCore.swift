@@ -121,7 +121,7 @@ final class CSRCore {
     case errSecItemNotFound:
       return false
     default:
-      throw CSRError(.keyExistsError, Self.error(code: Int(status), "Keychain lookup failed"))
+      throw CSRError(.keyExistsError, "Keychain lookup failed (OSStatus \(status))")
     }
   }
 
@@ -138,7 +138,7 @@ final class CSRCore {
 
     do {
       guard status == errSecSuccess, let item = result, CFGetTypeID(item) == SecKeyGetTypeID() else {
-        throw Self.error(code: Int(status), "Keychain lookup failed")
+        throw Self.error(code: Int(status), "Keychain lookup failed (OSStatus \(status))")
       }
 
       // The type ID check above is what makes this cast safe.
@@ -206,7 +206,7 @@ final class CSRCore {
     // for a pre-2.0 backup-eligible key to survive regeneration. Refuse rather than risk that.
     let deleteStatus = SecItemDelete(Self.keyQuery(alias) as CFDictionary)
     guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
-      throw Self.error(code: Int(deleteStatus), "Failed to delete existing key for alias")
+      throw Self.error(code: Int(deleteStatus), "Failed to delete existing key for alias (OSStatus \(deleteStatus))")
     }
 
     let privateKeyAttrs: [String: Any] = [

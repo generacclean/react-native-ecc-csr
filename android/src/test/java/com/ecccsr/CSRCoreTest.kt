@@ -26,6 +26,7 @@ import java.io.File
 import java.io.IOException
 import java.io.StringReader
 import java.security.KeyStore
+import java.security.KeyStoreException
 import java.util.Base64
 
 /**
@@ -44,6 +45,9 @@ class CSRCoreTest {
   fun setUp() {
     context = FakeContext(RuntimeEnvironment.getApplication())
     module = CSRCore(context)
+    // Robolectric has no AndroidKeyStore; stand in an empty one so lookups reach the software
+    // keystore. Tests of an unreadable hardware keystore replace this again.
+    module.openHardwareKeyStore = { KeyStore.getInstance("PKCS12").apply { load(null, null) } }
 
     // Robolectric may hand out the same app directories to more than one test method, so a
     // leftover keystore or quarantined file would let the corruption tests below pass on
@@ -179,6 +183,22 @@ class CSRCoreTest {
   @Test
   fun testGetPublicKeyForUnknownAliasRejects() {
     settle { module.getPublicKey("never-created-alias") }.rejected("KEY_NOT_FOUND")
+  }
+
+  @Test
+  fun testKeyExistsRejectsWhenTheHardwareKeystoreCannotBeRead() {
+    module.openHardwareKeyStore = { throw KeyStoreException("hardware keystore unavailable") }
+
+    // Resolving false here would tell the app a possibly-enrolled hardware key is gone.
+    settle { module.keyExists("some-alias") }.rejected("KEY_EXISTS_ERROR")
+  }
+
+  @Test
+  fun testGetPublicKeyRejectsWhenTheHardwareKeystoreCannotBeRead() {
+    module.openHardwareKeyStore = { throw KeyStoreException("hardware keystore unavailable") }
+
+    // KEY_NOT_FOUND would invite a re-enrolment over a key that may still be there.
+    settle { module.getPublicKey("some-alias") }.rejected("GET_PUBLIC_KEY_ERROR")
   }
 
   @Test
@@ -422,9 +442,8 @@ class CSRCoreTest {
 
     val outcome = settle { module.keyExists("some-alias") }
 
-    // The software-keystore branch normally swallows failures and resolves false. Doing that
-    // when storage itself is unreachable would tell the app its key is gone, and the app would
-    // re-enrol with a new key while its issued certificate silently stopped matching.
+    // Resolving false when storage itself is unreachable would tell the app its key is gone, and
+    // the app would re-enrol with a new key while its issued certificate silently stopped matching.
     assertTrue("unreachable keystore storage must reject, not resolve false", outcome is Outcome.Rejected)
     outcome.rejected("KEY_EXISTS_ERROR")
   }

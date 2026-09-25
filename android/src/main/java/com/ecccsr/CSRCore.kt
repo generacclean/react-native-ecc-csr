@@ -141,6 +141,14 @@ class CSRCore(private val context: Context) {
   }
 
   /**
+   * Opens the hardware keystore for [keyExists] and [getPublicKey]. A seam for tests only:
+   * Robolectric has no AndroidKeyStore, so without it every lookup would fail.
+   */
+  internal var openHardwareKeyStore: () -> KeyStore = {
+    KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+  }
+
+  /**
    * Directory holding the software keystore: [Context.getNoBackupFilesDir], not `getFilesDir()`.
    *
    * Android never includes the no-backup directory in Auto Backup, cloud backup, or device
@@ -1181,31 +1189,21 @@ class CSRCore(private val context: Context) {
     )
   }
 
+  /**
+   * False only when neither keystore holds the alias. A keystore that cannot be read rejects with
+   * KEY_EXISTS_ERROR instead, as on iOS: installer-app clears its MQTT auth on false, so reporting
+   * an unreadable store as "no key" would drop a key that is still enrolled.
+   */
   fun keyExists(privateKeyAlias: String): Boolean {
     try {
-      // Check hardware keystore
-      try {
-        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
-        keyStore.load(null)
-        if (keyStore.containsAlias(privateKeyAlias)) {
-          return true
-        }
-      } catch (e: Exception) {
-        // Continue to software keystore
+      if (openHardwareKeyStore().containsAlias(privateKeyAlias)) {
+        return true
       }
 
-      // Synchronize software keystore access
+      // Synchronize software keystore access. loadSoftwareKeyStore() handles corruption
+      // internally, so anything it throws means the store could not be read.
       synchronized(SOFTWARE_KEYSTORE_LOCK) {
-        return try {
-          val softwareKeyStore = loadSoftwareKeyStore()
-          softwareKeyStore.containsAlias(privateKeyAlias)
-        } catch (e: KeystoreLocationException) {
-          throw e // "storage is broken" must not be reported as "key does not exist"
-        } catch (e: Exception) {
-          // loadSoftwareKeyStore() handles corruption internally; unexpected errors return false
-          Log.w(MODULE_NAME, "Error checking software keystore: " + e.message)
-          false
-        }
+        return loadSoftwareKeyStore().containsAlias(privateKeyAlias)
       }
     } catch (e: Exception) {
       throw CSRException(ErrorCode.KEY_EXISTS_ERROR, "Failed to check key existence: " + e.message, e)
@@ -1214,20 +1212,15 @@ class CSRCore(private val context: Context) {
 
   fun getPublicKey(privateKeyAlias: String): String {
     try {
-      // Try hardware keystore first
-      try {
-        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
-        keyStore.load(null)
-
-        if (keyStore.containsAlias(privateKeyAlias)) {
-          val entry = keyStore.getEntry(privateKeyAlias, null)
-          if (entry is KeyStore.PrivateKeyEntry) {
-            val publicKey = entry.certificate.publicKey
-            return Base64.encodeToString(publicKey.encoded, Base64.NO_WRAP)
-          }
+      // Try hardware keystore first. A failure to read it rejects with GET_PUBLIC_KEY_ERROR (via
+      // the outer catch) rather than falling through to KEY_NOT_FOUND, which means "no key".
+      val keyStore = openHardwareKeyStore()
+      if (keyStore.containsAlias(privateKeyAlias)) {
+        val entry = keyStore.getEntry(privateKeyAlias, null)
+        if (entry is KeyStore.PrivateKeyEntry) {
+          val publicKey = entry.certificate.publicKey
+          return Base64.encodeToString(publicKey.encoded, Base64.NO_WRAP)
         }
-      } catch (e: Exception) {
-        // Continue to software keystore
       }
 
       // Synchronize software keystore access
