@@ -233,6 +233,14 @@ final class CSRCore {
   }
 
   private func generateKeyPair(curve: Curve, alias: String, useHardwareKey: Bool) throws -> KeyPair {
+    // The Keychain does not dedupe keys on tag alone, so a key left under this alias would sit
+    // beside the new one and a tag lookup could return either - a cert/key mismatch, and a way
+    // for a pre-2.0 backup-eligible key to survive regeneration. Refuse rather than risk that.
+    let deleteStatus = SecItemDelete(Self.keyQuery(alias) as CFDictionary)
+    guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
+      throw Self.error(code: Int(deleteStatus), "Failed to delete existing key for alias")
+    }
+
     let privateKeyAttrs: [String: Any] = [
       kSecAttrIsPermanent as String: true,
       kSecAttrApplicationTag as String: Data(alias.utf8),

@@ -1298,9 +1298,11 @@ class CSRCore(private val context: Context) {
         } catch (e: KeystoreLocationException) {
           throw e // "storage is broken" must not be reported as "key does not exist"
         } catch (e: Exception) {
-          // loadSoftwareKeyStore() handles corruption internally; unexpected errors here are retrieval failures
+          // loadSoftwareKeyStore() handles corruption internally, so what reaches here is a key that
+          // is present but unreadable (e.g. UnrecoverableEntryException). KEY_NOT_FOUND would invite
+          // the app to re-enrol over a key that still exists, so report it as a retrieval failure.
           Log.w(MODULE_NAME, "Error retrieving key from software keystore: " + e.message)
-          promise.reject("KEY_NOT_FOUND", "Key with alias '$privateKeyAlias' not found")
+          promise.reject("GET_PUBLIC_KEY_ERROR", "Failed to read key with alias '$privateKeyAlias': " + e.message, e)
           return
         }
       }

@@ -322,6 +322,21 @@ const result: CSRResult = await CSRModule.generateCSR(params);
 - Android minSdk 23, iOS 15.1
 - BouncyCastle library (included)
 
+## Troubleshooting
+
+**`Cannot find native module 'CSRModule'` at startup.** The module is linked by Expo autolinking,
+and since 2.0 `requireNativeModule` throws as soon as the package is imported (1.x only failed on
+the first call). Check that the app uses Expo Modules (see [Requirements](#requirements)), then
+rebuild the native projects with `npx expo prebuild --clean`.
+
+**Upgraded from 1.x but the old native code still runs, or the build fails on `CSRPackage`.** The
+native projects were generated before the upgrade. Run `npx expo prebuild --clean` and remove any
+manual linking the app added for 1.x: `react-native.config.js` overrides, `Podfile` entries, or a
+`CSRPackage` registration in `MainApplication`.
+
+**iOS build fails on the deployment target.** 2.0 requires iOS 15.1. Apps that support iOS
+12.0–15.0 must stay on 1.x.
+
 ## Architecture
 
 Each platform has an RN/Expo-free core that holds all behaviour, and a thin Expo module that
