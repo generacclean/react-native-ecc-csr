@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "ECC CSR Example",
+    "slug": "react-native-ecc-csr-example",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "ios": {
+      "bundleIdentifier": "com.ecccsr.example"
+    },
+    "android": {
+      "package": "com.ecccsr.example"
+    }
+  }
+}

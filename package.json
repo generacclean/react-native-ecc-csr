@@ -6,6 +6,12 @@
   "types": "src/index.ts",
   "react-native": "src/index.ts",
   "source": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "typecheck:example": "tsc --noEmit -p example",
+    "open:ios": "xed example/ios",
+    "open:android": "open -a \"Android Studio\" example/android"
+  },
   "files": [
     "android",
     "!android/build",
@@ -38,5 +44,12 @@
   "peerDependencies": {
     "expo": ">=55.0.0",
     "react-native": ">=0.83.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "expo": "~55.0.31",
+    "react": "19.2.0",
+    "react-native": "0.83.10",
+    "typescript": "~5.9.2"
   }
 }

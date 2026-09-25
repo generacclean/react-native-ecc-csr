@@ -40,10 +40,10 @@ React Native CLI autolinking no longer finds it.
 | Expo SDK | not required | >= 55 |
 | React Native | >= 0.60 | >= 0.83 |
 | iOS deployment target | 12.0 | **15.1** |
-| Android minSdk | 23 | 23 (unchanged) |
+| Android minSdk | 23 | **24** |
 
-iOS 15.1 is the floor of the Expo SDK this module targets. Apps that still support iOS 12.0–15.0
-must stay on 1.x.
+iOS 15.1 and Android minSdk 24 are the floors of the Expo SDK this module targets (expo-modules-core
+declares both). Apps that still support iOS 12.0–15.0 or Android 6.0 (API 23) must stay on 1.x.
 
 ### 3. A missing native module fails at import, not at first call
 
@@ -140,9 +140,9 @@ still passed through as before.
 ## 🧪 Testing
 
 74 JVM unit tests (Robolectric), no emulator required. The suite now calls `CSRCore` directly
-(`CSRModuleTest` → `CSRCoreTest`), so it needs neither React Native nor Expo, and the CI job runs it
-standalone. `CSRModule.kt` is excluded from the standalone build because `expo-modules-core` only
-exists inside a consuming app.
+(`CSRModuleTest` → `CSRCoreTest`). CI runs it through the example app in `example/`, which also builds
+both platforms (so the Kotlin and Swift adapters compile against Expo SDK 55), type-checks the
+TypeScript and lints the podspec.
 
 Manual verification (installer-app):
 

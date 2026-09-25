@@ -803,8 +803,8 @@ public class CSRCoreTest {
     public void testHardwareCapabilitiesBelowApi31NotTlsCompatible() {
         // Android 11 (API 30) - below the API 31 PURPOSE_AGREE_KEY requirement.
         // Build.VERSION.SDK_INT is set directly (rather than via @Config(sdk=)) because
-        // @Config triggers Robolectric's binary-resource loading path, which this module's
-        // minSdk (23) is incompatible with under react-android 0.76's manifest (minSdk 24).
+        // @Config triggers Robolectric's binary-resource loading path, which fails the manifest
+        // merge in the standalone build this test was written against.
         ReflectionHelpers.setStaticField(android.os.Build.VERSION.class, "SDK_INT", 30);
         CSRCore.HardwareCapabilities caps = module.getHardwareKeystoreCapabilitiesInternal();
         assertFalse(caps.tlsCompatible);

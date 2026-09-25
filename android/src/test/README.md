@@ -1,8 +1,9 @@
 # Unit Tests for react-native-ecc-csr
 
 This directory contains unit tests for `CSRCore`, the Android implementation. The Expo module
-(`CSRModule.kt`) only adapts arguments and promises onto it, and is not compiled in standalone
-builds - see the comment at the top of `android/build.gradle`.
+(`CSRModule.kt`) only adapts arguments and promises onto it. The module's Gradle build needs
+`expo-module-gradle-plugin`, which only resolves inside an app, so the tests run through the
+example app in `example/`.
 
 ## Test Structure
 
@@ -25,25 +26,27 @@ android/src/test/java/com/ecccsr/
 ### From Command Line
 
 ```bash
-# Run all tests
+# One-off: install and generate the example's native projects
+cd example && yarn install && npx expo prebuild --clean
 cd android
-./gradlew test
+
+# Run all tests
+./gradlew :generacclean-react-native-ecc-csr:testDebugUnitTest
 
 # Run specific test class
-./gradlew test --tests com.ecccsr.BouncyCastleProviderTest
+./gradlew :generacclean-react-native-ecc-csr:testDebugUnitTest --tests com.ecccsr.BouncyCastleProviderTest
 
 # Run with verbose output
-./gradlew test --info
+./gradlew :generacclean-react-native-ecc-csr:testDebugUnitTest --info
 
-# Generate HTML report
-./gradlew test
-# Report will be at: android/build/reports/tests/test/index.html
+# HTML report (written to the module, not the example app)
+# android/build/reports/tests/testDebugUnitTest/index.html
 
 # Force execution when Gradle considers the task up to date
-./gradlew test --rerun-tasks
+./gradlew :generacclean-react-native-ecc-csr:testDebugUnitTest --rerun-tasks
 ```
 
-`./gradlew test` prints `BUILD SUCCESSFUL` without running anything when Gradle judges the task
+The test task prints `BUILD SUCCESSFUL` without running anything when Gradle judges the task
 up to date, which is easy to mistake for a passing run — especially when checking that a change
 actually breaks a test. Use `--rerun-tasks`, or read the counts out of
 `android/build/test-results/testDebugUnitTest/*.xml`.
@@ -174,14 +177,7 @@ public class MyNewTest {
 ### 2. Run the test
 
 ```bash
-./gradlew test --tests com.ecccsr.MyNewTest
-```
-
-### 3. Check coverage
-
-```bash
-./gradlew jacocoTestReport
-# Report at: android/build/reports/jacoco/test/html/index.html
+./gradlew :generacclean-react-native-ecc-csr:testDebugUnitTest --tests com.ecccsr.MyNewTest
 ```
 
 ## Best Practices
@@ -227,7 +223,7 @@ anything using a platform API newer than API 16.
 ## Next Steps
 
 Robolectric coverage of `CSRCore` and a blocking CI pipeline
-(`.github/workflows/android-tests.yml`) are in place. What's left:
+(`.github/workflows/ci.yml`) are in place. What's left:
 
 1. **Add instrumented tests** in a separate directory for the hardware-keystore paths
    listed under "What's NOT Tested" above
@@ -248,7 +244,7 @@ gradle wrapper
 ### Dependencies not found
 ```bash
 # Sync gradle
-cd android
+cd example/android
 ./gradlew build --refresh-dependencies
 ```
 

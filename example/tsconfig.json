@@ -1,0 +1,10 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "paths": {
+      "@generacclean/react-native-ecc-csr": ["../src/index"]
+    }
+  }
+}

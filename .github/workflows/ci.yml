@@ -1,0 +1,118 @@
+name: CI
+
+# The module's native code only builds inside an app (expo-module-gradle-plugin and ExpoModulesCore
+# come from there), so the Android and iOS jobs build and test it through the example app.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'yarn'
+          cache-dependency-path: |
+            yarn.lock
+            example/yarn.lock
+
+      - run: yarn install --frozen-lockfile
+      - run: yarn install --frozen-lockfile
+        working-directory: example
+
+      - name: Type-check library
+        run: yarn typecheck
+
+      - name: Type-check example
+        run: yarn typecheck:example
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'yarn'
+          cache-dependency-path: example/yarn.lock
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: yarn install --frozen-lockfile
+        working-directory: example
+
+      - name: Generate native project
+        run: npx expo prebuild --platform android --no-install
+        working-directory: example
+
+      - name: Run CSRCore unit tests
+        run: ./gradlew :generacclean-react-native-ecc-csr:testDebugUnitTest --no-daemon
+        working-directory: example/android
+
+      - name: Build example app
+        # One ABI is enough to compile the module; the emulator ABI keeps the build short.
+        run: ./gradlew :app:assembleDebug --no-daemon -PreactNativeArchitectures=x86_64
+        working-directory: example/android
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-reports
+          path: android/build/reports/tests
+          retention-days: 14
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'yarn'
+          cache-dependency-path: example/yarn.lock
+
+      - name: Lint podspec
+        # --quick validates the spec itself; ExpoModulesCore is not on CocoaPods trunk, so a full
+        # lint cannot resolve it. The example build below is what compiles the Swift code.
+        run: pod lib lint react-native-ecc-csr.podspec --quick
+        working-directory: ios
+
+      - run: yarn install --frozen-lockfile
+        working-directory: example
+
+      - name: Generate native project and install pods
+        run: npx expo prebuild --platform ios
+        working-directory: example
+
+      - name: Build example app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace ECCCSRExample.xcworkspace \
+            -scheme ECCCSRExample \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build | tail -n 200
+        working-directory: example/ios

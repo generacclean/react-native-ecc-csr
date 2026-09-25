@@ -319,7 +319,7 @@ const result: CSRResult = await CSRModule.generateCSR(params);
 - An app using Expo Modules (Expo SDK >= 55, React Native >= 0.83). This is an
   [Expo Module](https://docs.expo.dev/modules/overview/), linked by Expo autolinking; bare React
   Native apps need [`expo` installed](https://docs.expo.dev/bare/installing-expo-modules/) first.
-- Android minSdk 23, iOS 15.1
+- Android minSdk 24, iOS 15.1 (the floors of Expo SDK 55)
 - BouncyCastle library (included)
 
 ## Troubleshooting
@@ -360,31 +360,40 @@ slow key generation cannot stall other modules' async calls.
 These are automatically included by the module as transitive dependencies.
 
 **No React Native compile dependency:** `CSRCore` uses only Android and BouncyCastle APIs. The
-Kotlin Expo glue gets `expo-modules-core` from the consuming app, so `android/build.gradle` only
-compiles it when an `:expo-modules-core` project exists. Standalone builds (`./gradlew test`, CI)
-skip the glue and build and test `CSRCore` on its own.
+Kotlin Expo glue gets `expo-modules-core` through `expo-module-gradle-plugin`, which only resolves
+inside an app, so the module is built and tested through the example app in `example/`.
 
 ## Testing
 
-Android logic is covered by JVM unit tests (Robolectric) and gated in CI by
-`.github/workflows/android-tests.yml`:
+`example/` is an Expo SDK 55 app that links this module from the repo root, with a button for each
+function. CI (`.github/workflows/ci.yml`) type-checks the library and the example, runs the Android
+unit tests, builds the example for Android and the iOS simulator, and lints the podspec.
 
 ```bash
-cd android && ./gradlew test
+yarn install && (cd example && yarn install)
+yarn typecheck && yarn typecheck:example
+
+cd example
+npx expo prebuild --clean   # generates example/android and example/ios
+cd android && ./gradlew :generacclean-react-native-ecc-csr:testDebugUnitTest
+cd .. && npx expo run:ios   # or run:android, to try it on a simulator or device
 ```
+
+Android logic is covered by JVM unit tests (Robolectric); test reports land in
+`android/build/reports/tests/`.
 
 See `android/src/test/README.md` for what is and isn't covered.
 
 Robolectric tests run against API 33, pinned in `android/src/test/resources/robolectric.properties`
 and backed by `testOptions.unitTests.includeAndroidResources`. Both are required: without the merged
 manifest, Robolectric falls back to legacy resources mode, which is unsupported after API 28 and
-silently drops every Robolectric test down to its API 16 floor — seven levels below this module's
-`minSdk 23`. Platform APIs newer than 16 then fail at runtime with `NoSuchMethodError` despite
+silently drops every Robolectric test down to its API 16 floor — eight levels below the `minSdk 24`
+that expo-modules-core requires. Platform APIs newer than 16 then fail at runtime with `NoSuchMethodError` despite
 compiling cleanly. Tests that need a specific level still override `Build.VERSION.SDK_INT` locally.
 
-**iOS has no automated test coverage.** `ios/CSRCore.swift` carries the other half of this
-module and is verified manually only, so a CSR-format regression on iOS would not be caught
-by CI. Exercise iOS changes against a real device or simulator before release.
+**iOS has no automated test coverage.** CI compiles `ios/` as part of the example build, but
+`ios/CSRCore.swift` is otherwise verified manually only, so a CSR-format regression on iOS would
+not be caught by CI. Exercise iOS changes against a real device or simulator before release.
 
 ## Android Configuration
 
@@ -531,7 +540,7 @@ Understanding the security implications of different key storage methods is impo
 | **Encryption at Rest** | ❌ No encryption (OS-level protection only) | ✅ Hardware-encrypted |
 | **Root Protection** | ❌ Vulnerable to root access | ✅ Fully protected |
 | **Backup Exposure** | ✅ Excluded (stored in `no_backup/`) | ✅ Cannot be backed up |
-| **Device Compatibility** | ✅ All devices (API 23+) | ⚠️ Android 12+ for TLS |
+| **Device Compatibility** | ✅ All devices (API 24+) | ⚠️ Android 12+ for TLS |
 | **Performance** | ⚠️ Slower (software crypto) | ✅ Faster (hardware acceleration) |
 | **Survives Reinstall** | ❌ Deleted with app | ✅ Persists (manual delete required) |
 | **Key Extraction** | ⚠️ Possible with root or physical access | ✅ Impossible (hardware-bound) |
