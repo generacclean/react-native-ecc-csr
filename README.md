@@ -12,7 +12,7 @@ A React Native module for generating Certificate Signing Requests (CSR) with Ell
 
 **Backup Exclusion (Android):** No configuration required. Android never includes `getNoBackupFilesDir()` in Auto Backup, cloud backup, or device-to-device transfer, so the private key cannot leave the device through backup infrastructure no matter what your app sets for `android:allowBackup`, `android:fullBackupContent`, or `android:dataExtractionRules`.
 
-**iOS is different — do not read the guarantee above as cross-platform.** iOS keys live in the Keychain, not in a file, so none of the directory or manifest discussion applies. `ios/CSRCore.swift` adds Keychain items without an explicit `kSecAttrAccessible` value, which means they default to `kSecAttrAccessibleWhenUnlocked` — and an *encrypted* iTunes/Finder backup **does** include items with that accessibility. Only the `…ThisDeviceOnly` variants are excluded. Secure Enclave keys (`useHardwareKey: true`) are non-exportable regardless. Treat a software-backed iOS key as backup-eligible until this module sets `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
+**iOS is different — do not read the guarantee above as cross-platform.** iOS keys live in the Keychain, not in a file, so none of the directory or manifest discussion applies. Since 2.0.0, `ios/CSRCore.swift` stores software keys with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, which excludes them from encrypted iTunes/Finder backups and device migration. Keys created by 1.x were stored with the default `kSecAttrAccessibleWhenUnlocked`, which encrypted backups **do** include; they keep that accessibility until regenerated. Secure Enclave keys (`useHardwareKey: true`) are non-exportable regardless.
 
 Earlier versions shipped `backup_rules.xml` and `data_extraction_rules.xml` for the consuming app to reference from its manifest. Those files have been **removed** — the approach could not be made reliable, because `android:fullBackupContent` and `android:dataExtractionRules` each accept exactly one resource reference and nothing merges them. Any other library that claimed either attribute (`expo-secure-store`, for example) silently deactivated this module's exclusions. If your manifest or config plugin still references `@xml/backup_rules` or `@xml/data_extraction_rules` from this package, remove those references; nothing else is needed in their place.
 
@@ -36,7 +36,7 @@ See [Security Considerations](#security-considerations) section below for detail
 - ✅ Generate CSR with ECC keys (P-256, P-384, P-521)
 - ✅ Intelligent hardware vs software keystore selection
 - ✅ Hardware-backed keys with TLS compatibility checks
-- ✅ SHA256 signature algorithm
+- ✅ ECDSA signature digest matched to the curve (SHA-256 / SHA-384 / SHA-512)
 - ✅ Subject Alternative Name (SAN) support with IP addresses
 - ✅ Full TypeScript support
 - ✅ Configurable subject DN fields
@@ -251,7 +251,7 @@ See [example-usage.tsx](./example-usage.tsx) for more examples.
 # View CSR details
 openssl req -in csr.csr -noout -text
 
-# Check signature algorithm (should be ecdsa-with-SHA256)
+# Check signature algorithm (ecdsa-with-SHA256 / SHA384 / SHA512 for P-256 / P-384 / P-521)
 openssl req -in csr.csr -noout -text | grep "Signature Algorithm"
 
 # Check curve
@@ -266,7 +266,7 @@ openssl req -in csr.csr -noout -text | grep -A 1 "Subject Alternative Name"
 The module generates CSRs with the following characteristics:
 
 - **Format:** PKCS#10
-- **Signature Algorithm:** ecdsa-with-SHA256
+- **Signature Algorithm:** ecdsa-with-SHA256 (P-256), ecdsa-with-SHA384 (P-384, the default), ecdsa-with-SHA512 (P-521)
 - **Key Usage (critical):** Digital Signature, Key Agreement
 - **Extended Key Usage:** TLS Web Client Authentication
 - **Subject Alternative Name:** IP Address (configurable)
@@ -290,7 +290,7 @@ Certificate Request:
                 TLS Web Client Authentication
             X509v3 Subject Alternative Name:
                 IP Address:10.10.10.10
-    Signature Algorithm: ecdsa-with-SHA256
+    Signature Algorithm: ecdsa-with-SHA384
 ```
 
 ## TypeScript Support

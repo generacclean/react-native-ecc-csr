@@ -63,7 +63,12 @@ final class CSRCore {
       throw CSRError("INVALID_PARAM", "privateKeyAlias is required")
     }
 
-    let curve = Curve(name: curveName)
+    let curve = try Curve(name: curveName)
+
+    let trimmedIPAddress = ipAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmedIPAddress.isEmpty && Self.ipAddressBytes(trimmedIPAddress) == nil {
+      throw CSRError("INVALID_IP", "Invalid IP address format: \(ipAddress)")
+    }
 
     let keyPair: KeyPair
     do {
@@ -231,6 +236,8 @@ final class CSRCore {
     let privateKeyAttrs: [String: Any] = [
       kSecAttrIsPermanent as String: true,
       kSecAttrApplicationTag as String: Data(alias.utf8),
+      // Keeps software keys out of encrypted iTunes/Finder backups and device migration.
+      kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
     ]
 
     var privateKey: SecKey?
@@ -322,9 +329,10 @@ final class CSRCore {
 
     let certRequestInfo = DER.sequence(DER.integer(0) + subjectDN + publicKeyInfo + attributes)
 
-    let signature = try Self.sign(certRequestInfo, with: privateKey)
+    let curve = Self.curve(of: publicKey)
+    let signature = try Self.sign(certRequestInfo, with: privateKey, curve: curve)
 
-    return DER.sequence(certRequestInfo + Self.encodeSignatureAlgorithm() + DER.bitString(signature))
+    return DER.sequence(certRequestInfo + Self.encodeSignatureAlgorithm(curve) + DER.bitString(signature))
   }
 
   // MARK: - DN Encoding
@@ -395,14 +403,9 @@ final class CSRCore {
       }
     }
 
-    if !ipAddress.isEmpty {
-      let octets = ipAddress.components(separatedBy: ".")
-      if octets.count == 4 {
-        // intValue plus truncation, matching the Objective-C cast to unsigned char: "300" encodes
-        // as 44 and "abc" as 0, rather than being rejected.
-        let ipBytes = octets.map { UInt8(truncatingIfNeeded: ($0 as NSString).intValue) }
-        sanData += Data([0x87, 0x04] + ipBytes)
-      }
+    // generateCSR has already rejected a non-empty IP that does not parse.
+    if let ipBytes = ipAddressBytes(ipAddress.trimmingCharacters(in: .whitespacesAndNewlines)) {
+      sanData += DER.tagged(0x87, ipBytes)
     }
 
     if let phoneInfo, !phoneInfo.isEmpty {
@@ -435,13 +438,27 @@ final class CSRCore {
 
   // MARK: - Signing
 
-  private static func sign(_ data: Data, with privateKey: SecKey) throws -> Data {
-    let hash = Data(SHA256.hash(data: data))
+  /// The digest matches the curve's security level: SHA-256 for P-256, SHA-384 for P-384 and
+  /// SHA-512 for P-521, the same pairing Android uses.
+  private static func sign(_ data: Data, with privateKey: SecKey, curve: Curve) throws -> Data {
+    let hash: Data
+    let algorithm: SecKeyAlgorithm
+    switch curve {
+    case .p256:
+      hash = Data(SHA256.hash(data: data))
+      algorithm = .ecdsaSignatureDigestX962SHA256
+    case .p384:
+      hash = Data(SHA384.hash(data: data))
+      algorithm = .ecdsaSignatureDigestX962SHA384
+    case .p521:
+      hash = Data(SHA512.hash(data: data))
+      algorithm = .ecdsaSignatureDigestX962SHA512
+    }
 
     var cfError: Unmanaged<CFError>?
     guard let signature = SecKeyCreateSignature(
       privateKey,
-      .ecdsaSignatureDigestX962SHA256,
+      algorithm,
       hash as CFData,
       &cfError
     ) as Data? else {
@@ -451,8 +468,26 @@ final class CSRCore {
     return signature
   }
 
-  private static func encodeSignatureAlgorithm() -> Data {
-    DER.sequence(DER.oid("1.2.840.10045.4.3.2"))
+  private static func encodeSignatureAlgorithm(_ curve: Curve) -> Data {
+    DER.sequence(DER.oid(curve.signatureAlgorithmOID))
+  }
+
+  // MARK: - IP Addresses
+
+  /// Network-order bytes of a literal IPv4 or IPv6 address, or nil when `ip` is not one. Hostnames
+  /// and out-of-range octets are rejected rather than truncated, matching Android's `INVALID_IP`.
+  private static func ipAddressBytes(_ ip: String) -> Data? {
+    var ipv4 = in_addr()
+    if inet_pton(AF_INET, ip, &ipv4) == 1 {
+      return withUnsafeBytes(of: &ipv4) { Data($0) }
+    }
+
+    var ipv6 = in6_addr()
+    if inet_pton(AF_INET6, ip, &ipv6) == 1 {
+      return withUnsafeBytes(of: &ipv6) { Data($0) }
+    }
+
+    return nil
   }
 
   // MARK: - Public Key Info
@@ -477,12 +512,14 @@ final class CSRCore {
 private enum Curve {
   case p256, p384, p521
 
-  /// Unrecognised names fall back to P-384, the module default.
-  init(name: String) {
+  /// Unrecognised names are rejected, matching Android's `INVALID_CURVE`.
+  init(name: String) throws {
     switch name {
     case "secp256r1": self = .p256
+    case "secp384r1": self = .p384
     case "secp521r1": self = .p521
-    default: self = .p384
+    default:
+      throw CSRError("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1")
     }
   }
 
@@ -507,6 +544,15 @@ private enum Curve {
     case .p256: return "1.2.840.10045.3.1.7"
     case .p384: return "1.3.132.0.34"
     case .p521: return "1.3.132.0.35"
+    }
+  }
+
+  /// ecdsa-with-SHA256 / SHA384 / SHA512, paired with the digest `sign(_:with:curve:)` uses.
+  var signatureAlgorithmOID: String {
+    switch self {
+    case .p256: return "1.2.840.10045.4.3.2"
+    case .p384: return "1.2.840.10045.4.3.3"
+    case .p521: return "1.2.840.10045.4.3.4"
     }
   }
 }

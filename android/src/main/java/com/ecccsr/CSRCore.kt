@@ -51,6 +51,7 @@ import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFilePermissions
 import java.security.GeneralSecurityException
 import java.security.KeyFactory
 import java.security.KeyPair
@@ -516,9 +517,15 @@ class CSRCore(private val context: Context) {
       throw IOException("Failed to delete existing temp keystore file")
     }
 
-    // Write to temp file first with secure permissions set immediately
+    // On API 26+ the temp file is created owner-only, so it never exists with default permissions.
+    // Below that, FileOutputStream creates it and the permissions are narrowed straight afterwards,
+    // before any key material is written.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      Files.createFile(tempFile.toPath(), PosixFilePermissions.asFileAttribute(
+        hashSetOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)))
+    }
+
     FileOutputStream(tempFile).use { fos ->
-      // Set secure permissions BEFORE writing data to minimize exposure window
       setSecureFilePermissions(tempFile)
       keyStore.store(fos, KEYSTORE_PASSWORD)
     }
@@ -599,7 +606,7 @@ class CSRCore(private val context: Context) {
   }
 
   @Throws(Exception::class)
-  private fun createSelfSignedCertificate(keyPair: KeyPair, subjectDN: String): X509Certificate {
+  private fun createSelfSignedCertificate(keyPair: KeyPair, subjectDN: String, keystoreCurve: String): X509Certificate {
     val now = System.currentTimeMillis()
     val startDate = Date(now)
     val endDate = Date(now + 365L * 24 * 60 * 60 * 1000)
@@ -610,13 +617,25 @@ class CSRCore(private val context: Context) {
 
     val certBuilder = X509v3CertificateBuilder(subject, serialNumber, startDate, endDate, subject, publicKeyInfo)
 
-    val signer = JcaContentSignerBuilder("SHA256withECDSA")
+    val signer = JcaContentSignerBuilder(signatureAlgorithmFor(keystoreCurve))
       .setProvider(FULL_BC_PROVIDER)
       .build(keyPair.private)
 
     return JcaX509CertificateConverter()
       .setProvider(FULL_BC_PROVIDER)
       .getCertificate(certBuilder.build(signer))
+  }
+
+  /**
+   * Matches the digest to the curve's security level. Hardware keys are generated with all three
+   * digests allowed (see generateHardwareKeyPair), so this holds for both key paths.
+   */
+  private fun signatureAlgorithmFor(keystoreCurve: String): String {
+    return when (keystoreCurve) {
+      "secp384r1" -> "SHA384withECDSA"
+      "secp521r1" -> "SHA512withECDSA"
+      else -> "SHA256withECDSA"
+    }
   }
 
   private fun canUseHardwareKeysForTLS(): Boolean {
@@ -930,10 +949,11 @@ class CSRCore(private val context: Context) {
       csrBuilder.addAttribute(PKCSObjectIdentifiers.pkcs_9_at_extensionRequest, extGen.generate())
 
       currentStep = "CSR signing"
+      val signatureAlgorithm = signatureAlgorithmFor(keystoreCurve)
       val signer: ContentSigner = if (useHardwareKey) {
-        AndroidKeystoreContentSigner(privateKey, "SHA256withECDSA")
+        AndroidKeystoreContentSigner(privateKey, signatureAlgorithm)
       } else {
-        JcaContentSignerBuilder("SHA256withECDSA").setProvider(FULL_BC_PROVIDER).build(privateKey)
+        JcaContentSignerBuilder(signatureAlgorithm).setProvider(FULL_BC_PROVIDER).build(privateKey)
       }
 
       val builtCsr = csrBuilder.build(signer)
@@ -1099,18 +1119,18 @@ class CSRCore(private val context: Context) {
     // Prevents race conditions when multiple threads call generateCSR simultaneously
     // All read-modify-write operations on the PKCS12 file must be atomic to prevent corruption
     synchronized(SOFTWARE_KEYSTORE_LOCK) {
-      storeSoftwareKey(privateKeyAlias, keyPair)
+      storeSoftwareKey(privateKeyAlias, keyPair, keystoreCurve)
     }
 
     return keyPair
   }
 
   @Throws(Exception::class)
-  private fun storeSoftwareKey(privateKeyAlias: String, keyPair: KeyPair) {
+  private fun storeSoftwareKey(privateKeyAlias: String, keyPair: KeyPair, keystoreCurve: String) {
     val softwareKeyStore = loadSoftwareKeyStore()
 
     val tempSubject = "CN=Temp-$privateKeyAlias"
-    val selfSignedCert = createSelfSignedCertificate(keyPair, tempSubject)
+    val selfSignedCert = createSelfSignedCertificate(keyPair, tempSubject, keystoreCurve)
 
     softwareKeyStore.setKeyEntry(
       privateKeyAlias,

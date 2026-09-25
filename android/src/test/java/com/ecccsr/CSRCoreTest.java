@@ -158,6 +158,28 @@ public class CSRCoreTest {
         assertTrue("CSR signature should verify against its own embedded public key", isValid);
     }
 
+    @Test
+    public void testGenerateCSRSignsWithDigestMatchingCurve() throws Exception {
+        // ecdsa-with-SHA256 / SHA384 / SHA512. iOS encodes the same OIDs, so both platforms issue
+        // algorithm-consistent CSRs for the same curve.
+        assertSignatureAlgorithm("alias-sig-p256", "secp256r1", "1.2.840.10045.4.3.2");
+        assertSignatureAlgorithm("alias-sig-p384", "secp384r1", "1.2.840.10045.4.3.3");
+        assertSignatureAlgorithm("alias-sig-p521", "secp521r1", "1.2.840.10045.4.3.4");
+    }
+
+    private void assertSignatureAlgorithm(String alias, String curve, String expectedOid) throws Exception {
+        CSRCore.CSRGenerationResult result = module.generateCSRInternal(paramsFor(alias, curve));
+        PKCS10CertificationRequest csr = parseCSR(result.csr);
+        assertEquals(curve, expectedOid, csr.getSignatureAlgorithm().getAlgorithm().getId());
+
+        org.bouncycastle.jce.provider.BouncyCastleProvider bc = new org.bouncycastle.jce.provider.BouncyCastleProvider();
+        java.security.PublicKey embeddedPublicKey = new JcaPKCS10CertificationRequest(csr).setProvider(bc).getPublicKey();
+        assertTrue(curve + " CSR signature should verify", csr.isSignatureValid(
+                new org.bouncycastle.operator.jcajce.JcaContentVerifierProviderBuilder()
+                        .setProvider(bc)
+                        .build(embeddedPublicKey)));
+    }
+
     private PKCS10CertificationRequest parseCSR(String pem) throws Exception {
         PemReader pemReader = new PemReader(new StringReader(pem));
         PemObject pemObject = pemReader.readPemObject();
