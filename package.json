@@ -19,6 +19,7 @@
     "!android/.gradle",
     "!android/.gradle/**",
     "ios",
+    "!ios/Tests",
     "src",
     "expo-module.config.json"
   ],

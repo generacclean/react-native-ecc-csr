@@ -80,7 +80,8 @@ jobs:
           retention-days: 14
 
   ios:
-    runs-on: macos-15
+    # ExpoModulesCore 55 needs the Swift 6.2 toolchain from Xcode 26; macos-15 defaults to Xcode 16.4.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -115,4 +116,20 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             COMPILER_INDEX_STORE_ENABLE=NO \
             build | tail -n 200
+        working-directory: example/ios
+
+      - name: Run CSRCore XCTests
+        # The test spec runs inside a CocoaPods app host because the Keychain rejects unhosted,
+        # unsigned test bundles (errSecMissingEntitlement). Simulator names vary by runner image, so
+        # use the first available iPhone.
+        run: |
+          set -o pipefail
+          udid=$(xcrun simctl list devices available -j \
+            | jq -r '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
+          xcodebuild \
+            -workspace ECCCSRExample.xcworkspace \
+            -scheme react-native-ecc-csr-Unit-Tests \
+            -destination "id=$udid" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            test | tail -n 200
         working-directory: example/ios

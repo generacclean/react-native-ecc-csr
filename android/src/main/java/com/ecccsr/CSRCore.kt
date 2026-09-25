@@ -102,8 +102,6 @@ class CSRCore(private val context: Context) {
 
     fun reject(code: String, message: String?, cause: Throwable?)
 
-    // A real JVM default method (build.gradle compiles with -Xjvm-default=all), so Java
-    // implementations such as the tests' RecordingPromise inherit it.
     fun reject(code: String, message: String?) {
       reject(code, message, null)
     }
@@ -123,39 +121,39 @@ class CSRCore(private val context: Context) {
    * generateCSRInternal - so it reaches the entry point and the promise rejects. Adding a new such
    * catch without that clause is what turns this back into a log line.
    */
-  class KeystoreLocationException : IOException {
+  internal class KeystoreLocationException : IOException {
     constructor(message: String) : super(message)
 
     constructor(message: String, cause: Throwable) : super(message, cause)
   }
 
   /** Thrown for validation failures that should be surfaced to JS as a specific error code. */
-  class CSRRejectedException(@JvmField val code: String, message: String) : Exception(message)
+  internal class CSRRejectedException(val code: String, message: String) : Exception(message)
 
   /**
    * Typed result of a CSR generation; [generateCSR] maps it for JS.
    *
    * Construct with named arguments so call sites can't silently swap the same-typed booleans.
    */
-  class CSRGenerationResult(
-    @JvmField val csr: String,
-    @JvmField val privateKeyAlias: String,
-    @JvmField val publicKeyBase64: String,
-    @JvmField val isHardwareBacked: Boolean,
-    @JvmField val useHardwareKey: Boolean,
-    @JvmField val hardwareKeyRequested: Boolean,
-    @JvmField val tlsCompatible: Boolean,
-    @JvmField val keystorePath: String?, // null when useHardwareKey is true
+  internal class CSRGenerationResult(
+    val csr: String,
+    val privateKeyAlias: String,
+    val publicKeyBase64: String,
+    val isHardwareBacked: Boolean,
+    val useHardwareKey: Boolean,
+    val hardwareKeyRequested: Boolean,
+    val tlsCompatible: Boolean,
+    val keystorePath: String?, // null when useHardwareKey is true
   )
 
   /** Typed result of a capability check; [getHardwareKeystoreCapabilities] maps it for JS. */
-  class HardwareCapabilities(
-    @JvmField val tlsCompatible: Boolean,
-    @JvmField val androidSdkVersion: Int,
-    @JvmField val hasStrongBox: Boolean,
-    @JvmField val manufacturer: String?,
-    @JvmField val model: String?,
-    @JvmField val device: String?,
+  internal class HardwareCapabilities(
+    val tlsCompatible: Boolean,
+    val androidSdkVersion: Int,
+    val hasStrongBox: Boolean,
+    val manufacturer: String?,
+    val model: String?,
+    val device: String?,
   )
 
   init {
@@ -415,7 +413,7 @@ class CSRCore(private val context: Context) {
    * @throws IOException see [getKeystoreDir]
    */
   @Throws(IOException::class)
-  fun getKeystoreFile(): File {
+  internal fun getKeystoreFile(): File {
     val file = File(getKeystoreDir(), SOFTWARE_KEYSTORE_FILE)
     // Set secure permissions if file exists
     if (file.exists()) {
@@ -643,7 +641,7 @@ class CSRCore(private val context: Context) {
    * Visible for tests, so they assert against the same alias rule generateCSRInternal enforces,
    * rather than a copy that can drift from production.
    */
-  fun isValidAlias(alias: String?): Boolean {
+  internal fun isValidAlias(alias: String?): Boolean {
     return alias != null && alias.trimJava().isNotEmpty()
   }
 
@@ -651,7 +649,7 @@ class CSRCore(private val context: Context) {
    * Visible for tests, so they assert against the same curve allow-list generateCSRInternal
    * enforces, rather than a copy that can drift from production.
    */
-  fun isValidCurve(curve: String?): Boolean {
+  internal fun isValidCurve(curve: String?): Boolean {
     return curve == "secp256r1" || curve == "secp384r1" || curve == "secp521r1"
   }
 
@@ -663,7 +661,7 @@ class CSRCore(private val context: Context) {
    * address string. This prevents hostname injection into SAN iPAddress extensions,
    * which would produce malformed certificates.
    */
-  fun isValidIPAddress(ip: String?): Boolean {
+  internal fun isValidIPAddress(ip: String?): Boolean {
     if (ip == null || ip.trimJava().isEmpty()) {
       return false
     }
@@ -746,7 +744,7 @@ class CSRCore(private val context: Context) {
   }
 
   // Sanitize DN values (already handled by X500NameBuilder, but add explicit method)
-  fun sanitizeDNValue(value: String?): String {
+  internal fun sanitizeDNValue(value: String?): String {
     // X500NameBuilder already handles escaping, but trim whitespace
     return value?.trimJava() ?: ""
   }
@@ -790,7 +788,7 @@ class CSRCore(private val context: Context) {
    * typed result and on the exception type rather than on a reply.
    */
   @Throws(Exception::class)
-  fun generateCSRInternal(params: Map<String, *>): CSRGenerationResult {
+  internal fun generateCSRInternal(params: Map<String, *>): CSRGenerationResult {
     var keyPair: KeyPair? = null
     var csr: PKCS10CertificationRequest? = null
     var currentStep = "initialization"
@@ -1204,7 +1202,7 @@ class CSRCore(private val context: Context) {
   }
 
   /** Core capability-check logic, separated from [getHardwareKeystoreCapabilities] for tests. */
-  fun getHardwareKeystoreCapabilitiesInternal(): HardwareCapabilities {
+  internal fun getHardwareKeystoreCapabilitiesInternal(): HardwareCapabilities {
     var hasStrongBox = false
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
       hasStrongBox = context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
@@ -1413,7 +1411,7 @@ class CSRCore(private val context: Context) {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
 
     /** Visible for the same reason as [CORRUPTED_INFIX]. */
-    const val SOFTWARE_KEYSTORE_FILE = "software_keys.p12"
+    internal const val SOFTWARE_KEYSTORE_FILE = "software_keys.p12"
     private const val TEMP_SUFFIX = ".tmp"
 
     /**
@@ -1424,7 +1422,7 @@ class CSRCore(private val context: Context) {
      * Visible so tests can stage and assert on quarantine filenames through the same constant
      * production uses, instead of a copy that can drift out of step with it.
      */
-    const val CORRUPTED_INFIX = ".corrupted."
+    internal const val CORRUPTED_INFIX = ".corrupted."
 
     /**
      * Filename infix marking a keystore that lost a newer-copy comparison during migration - see
@@ -1432,7 +1430,7 @@ class CSRCore(private val context: Context) {
      * [CORRUPTED_INFIX], but a distinct infix so a forensic reader can tell "this keystore
      * would not parse" from "a newer copy of this keystore turned up in the legacy location".
      */
-    const val SUPERSEDED_INFIX = ".superseded."
+    internal const val SUPERSEDED_INFIX = ".superseded."
 
     /**
      * Subdirectory for quarantined corrupt keystore files. Keeps timestamped

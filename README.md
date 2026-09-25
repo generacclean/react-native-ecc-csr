@@ -367,7 +367,8 @@ inside an app, so the module is built and tested through the example app in `exa
 
 `example/` is an Expo SDK 55 app that links this module from the repo root, with a button for each
 function. CI (`.github/workflows/ci.yml`) type-checks the library and the example, runs the Android
-unit tests, builds the example for Android and the iOS simulator, and lints the podspec.
+unit tests and the iOS XCTests, builds the example for Android and the iOS simulator, and lints the
+podspec.
 
 ```bash
 yarn install && (cd example && yarn install)
@@ -376,6 +377,8 @@ yarn typecheck && yarn typecheck:example
 cd example
 npx expo prebuild --clean   # generates example/android and example/ios
 cd android && ./gradlew :generacclean-react-native-ecc-csr:testDebugUnitTest
+cd ../ios && xcodebuild test -workspace ECCCSRExample.xcworkspace -scheme react-native-ecc-csr-Unit-Tests \
+  -destination "platform=iOS Simulator,name=<device>"
 cd .. && npx expo run:ios   # or run:android, to try it on a simulator or device
 ```
 
@@ -391,9 +394,11 @@ silently drops every Robolectric test down to its API 16 floor — eight levels 
 that expo-modules-core requires. Platform APIs newer than 16 then fail at runtime with `NoSuchMethodError` despite
 compiling cleanly. Tests that need a specific level still override `Build.VERSION.SDK_INT` locally.
 
-**iOS has no automated test coverage.** CI compiles `ios/` as part of the example build, but
-`ios/CSRCore.swift` is otherwise verified manually only, so a CSR-format regression on iOS would
-not be caught by CI. Exercise iOS changes against a real device or simulator before release.
+iOS logic is covered by XCTests in `ios/Tests/`: validation, the signature digest per curve (each CSR
+is parsed and its signature verified), and the Keychain lifecycle. They are a CocoaPods test spec
+that runs inside a generated app host, because the Keychain rejects unhosted test bundles;
+`example/plugins/withLibraryTests.js` enables it in the example Podfile. Secure Enclave keys still
+need a physical device.
 
 ## Android Configuration
 

@@ -9,16 +9,17 @@ example app in `example/`.
 
 ```
 android/src/test/java/com/ecccsr/
-├── BouncyCastleProviderTest.java  - Tests BC provider initialization
-├── InputValidationTest.java       - Tests input validation logic (delegates to CSRCore)
-├── CSRFormatTest.java             - Tests CSR format and X500 names
-├── CSRCoreTest.java               - Tests CSRCore directly: CSR generation, key lifecycle,
-│                                    keystore round-trip, corruption recovery, capabilities
+├── BouncyCastleProviderTest.kt  - Tests BC provider initialization
+├── InputValidationTest.kt       - Tests input validation logic (delegates to CSRCore)
+├── CSRFormatTest.kt             - Tests CSR format and X500 names
+├── CSRCoreTest.kt               - Tests CSRCore directly: CSR generation, key lifecycle,
+│                                  keystore round-trip, corruption recovery, capabilities
 └── testutil/
-    ├── FakeContext.java           - ContextWrapper over the Robolectric application, with hooks
-    │                                to make no-backup storage unavailable or unwritable
-    │                                (see "Simulating storage failures")
-    └── RecordingPromise.java      - CSRCore.Reply that captures resolve/reject for assertions
+    ├── FakeContext.kt           - ContextWrapper over the Robolectric application, with hooks
+    │                              to make no-backup storage unavailable or unwritable
+    │                              (see "Simulating storage failures")
+    └── Outcome.kt               - settle { }: runs a CSRCore entry point and returns what it
+                                 resolved or rejected with
 ```
 
 ## Running Tests
@@ -135,7 +136,7 @@ Tests use:
 - **JUnit 4.13.2** - Test framework
 - **Robolectric 4.10.3** - Android framework simulation, used by `CSRCoreTest`
   and `InputValidationTest` to instantiate `CSRCore` over a real application
-  `Context` (see `testutil/FakeContext.java`)
+  `Context` (see `testutil/FakeContext.kt`)
 
 ## What's NOT Tested (Requires Hardware/Emulator)
 

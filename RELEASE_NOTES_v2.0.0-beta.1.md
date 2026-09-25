@@ -139,10 +139,12 @@ still passed through as before.
 
 ## 🧪 Testing
 
-74 JVM unit tests (Robolectric), no emulator required. The suite now calls `CSRCore` directly
-(`CSRModuleTest` → `CSRCoreTest`). CI runs it through the example app in `example/`, which also builds
-both platforms (so the Kotlin and Swift adapters compile against Expo SDK 55), type-checks the
-TypeScript and lints the podspec.
+74 JVM unit tests (Robolectric, now in Kotlin), no emulator required. The suite now calls `CSRCore`
+directly (`CSRModuleTest` → `CSRCoreTest`). iOS gains 16 XCTests (`ios/Tests/`) covering validation,
+the signature digest per curve and the Keychain lifecycle, run on a simulator inside an app host.
+CI runs both suites through the example app in `example/`, which also builds both platforms (so the
+Kotlin and Swift adapters compile against Expo SDK 55), type-checks the TypeScript and lints the
+podspec.
 
 Manual verification (installer-app):
 
@@ -167,7 +169,6 @@ Manual verification (installer-app):
 - Not yet verified on a physical iPhone. The consuming app uses software keys only
   (`useHardwareKey: false`), and the module sets no Keychain access group, so the simulator runs the
   same Keychain code path as a device
-- iOS still has no automated tests; the Swift port is verified manually
 - The Expo adapter (`CSRModule.kt` / `CSRModule.swift`) is not covered by unit tests
 - iOS software keys created by 1.x remain backup-eligible until they are regenerated (see
   Breaking Changes §5)

@@ -19,6 +19,7 @@ Pod::Spec.new do |s|
   # Lives in ios/ rather than the package root because that is where Expo autolinking looks for
   # podspecs, so paths here are relative to ios/.
   s.source_files = "**/*.swift"
+  s.exclude_files = "Tests/**/*"
   s.pod_target_xcconfig = {
     "DEFINES_MODULE" => "YES"
   }
@@ -26,4 +27,11 @@ Pod::Spec.new do |s|
   s.dependency "ExpoModulesCore"
 
   s.frameworks = "Security"
+
+  # XCTests for CSRCore. The Keychain only works for signed, hosted code, so they run inside the
+  # app host CocoaPods generates. example/plugins/withLibraryTests.js enables this test spec.
+  s.test_spec "Tests" do |test_spec|
+    test_spec.source_files = "Tests/**/*.swift"
+    test_spec.requires_app_host = true
+  end
 end
